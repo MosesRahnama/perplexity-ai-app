@@ -1,0 +1,138 @@
+@startuml Perplexity Desktop App Architecture
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam componentStyle rectangle
+
+title Perplexity AI Desktop App - Architecture Diagram (v4.0.1)
+
+package "Main Process (Node.js/Electron)" {
+  component [main.js\n- App lifecycle\n- Window management\n- IPC handlers] as Main
+  component [notification-manager.js\n- Notification polling\n- CDN fetch\n- State management] as NotificationMgr
+  component [search-service.js\n- Quick search\n- Clipboard integration\n- Platform-specific copy] as SearchService
+  component [build-auto.js\n- OS detection\n- Build automation] as BuildAuto
+  
+  database [electron-store\n- Settings\n- Shortcuts\n- Notifications] as Store
+}
+
+package "Renderer Process (Browser)" {
+  component [index.html\n- Main UI\n- Sidebar navigation\n- Badge display] as MainUI
+  component [settings.html\n- Configuration UI\n- Shortcut manager] as SettingsUI
+  component [update.html\n- Update notifications\n- Release notes] as UpdateUI
+  component [notification.html\n- Notification viewer\n- Markdown renderer] as NotificationUI
+  component [notification-panel.html\n- Notification list\n- Bulk actions] as NotificationPanel
+  component [prefix-search.html\n- Custom prefix input\n- Quick actions] as PrefixSearch
+}
+
+package "Preload Scripts (Context Bridge)" {
+  component [preload.js\n- Main preload\n- IPC bridge] as PreloadMain
+  component [preload_inject.js\n- BrowserView preload\n- Content scripts] as PreloadInject
+  component [preload_notification.js] as PreloadNotif
+  component [preload_notification_panel.js] as PreloadPanel
+  component [preload_update.js] as PreloadUpdate
+  component [preload_prefix.js] as PreloadPrefix
+}
+
+package "BrowserView (Isolated)" {
+  component [perplexity.ai\n- Search interface] as PerplexityAI
+  component [labs.perplexity.ai\n- Chat interface] as PerplexityLabs
+}
+
+package "External Services" {
+  cloud [GitHub CDN\n- Notifications\n- Updates] as GitHub
+  cloud [Perplexity Services\n- Search API\n- Chat API] as Perplexity
+}
+
+package "System Integration" {
+  component [Tray Icon\n- Minimize to tray\n- Quick actions] as Tray
+  component [Global Shortcuts\n- Quick search\n- Custom prefix] as Shortcuts
+  component [Autostart\n- Launch on boot\n- Hidden mode] as Autostart
+  component [Protocol Handler\nperplexity-search://] as Protocol
+}
+
+package "Build System" {
+  component [electron-builder\n- NSIS (Windows)\n- DMG (macOS)\n- DEB/AppImage (Linux)] as ElectronBuilder
+  component [package.json\n- Scripts\n- Dependencies\n- Build config] as PackageJson
+}
+
+' Main Process relationships
+Main --> Store : read/write
+Main --> NotificationMgr : instantiate
+Main --> SearchService : instantiate
+Main --> Tray : create
+Main --> Shortcuts : register
+Main --> Autostart : configure
+Main --> GitHub : check updates
+
+NotificationMgr --> GitHub : fetch manifest
+NotificationMgr --> Store : persist
+SearchService --> Main : switchView()
+
+' Renderer relationships
+Main --> MainUI : load
+Main --> SettingsUI : open modal
+Main --> UpdateUI : show modal
+Main --> NotificationUI : show modal
+Main --> NotificationPanel : show modal
+Main --> PrefixSearch : show window
+
+MainUI --> PreloadMain : IPC
+SettingsUI --> PreloadMain : IPC
+UpdateUI --> PreloadUpdate : IPC
+NotificationUI --> PreloadNotif : IPC
+NotificationPanel --> PreloadPanel : IPC
+PrefixSearch --> PreloadPrefix : IPC
+
+' BrowserView relationships
+Main --> PerplexityAI : load in BrowserView
+Main --> PerplexityLabs : load in BrowserView
+PreloadInject --> PerplexityAI : inject scripts
+PreloadInject --> PerplexityLabs : inject scripts
+
+PerplexityAI --> Perplexity : HTTPS
+PerplexityLabs --> Perplexity : HTTPS
+
+' Build relationships
+BuildAuto --> PackageJson : execute scripts
+PackageJson --> ElectronBuilder : configure & build
+
+' Protocol
+Protocol --> Main : handle protocol
+
+note right of Main
+  **IPC Channels:**
+  - switch-ai-tool
+  - open-settings
+  - get-shortcuts / set-shortcuts
+  - open-notification-panel
+  - perform-quick-search
+  - toggle-autostart
+  - get-app-version
+end note
+
+note right of NotificationMgr
+  **Update Strategy:**
+  - Poll every 1 hour
+  - CDN: jsdelivr.net/gh/
+  - Manifest-driven
+  - Dismissal tracking
+end note
+
+note right of Store
+  **Persisted Data:**
+  - defaultAI
+  - shortcuts
+  - notifications
+  - dismissedNotifications
+  - lastUpdateCheck
+  - autoStartEnabled
+end note
+
+note right of ElectronBuilder
+  **Build Targets:**
+  - Windows: NSIS installer
+  - macOS: DMG + ZIP
+  - Linux: DEB + AppImage
+  - Auto-detection via build-auto.js
+end note
+
+@enduml
