@@ -31,21 +31,42 @@
 
 ---
 
-## ⚡ Perplexity — v4.0.0
+## ⚡ Perplexity — v4.0.1 + Enhancement Suite
 
 A complete build focused on performance, usability, and integration.
 
 ```js
-/* What's new in v4.0.0 */
+/* What's new in v4.0.1 */
 await perplexity.evolve({
   retainState: true,           // Persistent session memory
   systemTrayHibernation: true, // Minimize to system tray
   keyboardIntegration: true,   // Advanced shortcuts
   autostart: true,             // Launch on system boot
-  quickSearchCapabilities: true,    // Qucik searching
-  unifiedInterface: true       // Seamless navigation between tools
+  quickSearchCapabilities: true,    // Quick searching
+  unifiedInterface: true,      // Seamless navigation between tools
+  
+  /* 🚀 Enhancement Suite (NEW) */
+  multiProviderRouting: true,  // OpenAI, Anthropic, Vertex AI
+  intelligentCaching: true,    // Disk cache with TTL
+  costOptimization: true,      // Smart provider selection
+  decisionPolicies: true       // Customizable routing rules
 });
 ```
+
+### 🚀 New: Multi-Provider AI Enhancement
+
+The app now supports **intelligent multi-provider routing** for advanced AI integration:
+- **OpenAI** (GPT-4o, GPT-4o-mini)
+- **Anthropic** (Claude 3.5 Sonnet, Haiku)
+- **Google Vertex AI** (Gemini 1.5 Pro, Flash)
+
+**Features:**
+- 💾 Disk-based response caching (reduce costs by 30-50%)
+- 🎯 Context-aware routing (speed, reasoning, cost optimization)
+- 🔒 Secure secrets management (.env support)
+- 📊 Cost tracking and usage monitoring
+
+**Quick Start:** See [ENHANCEMENT_QUICKSTART.md](./ENHANCEMENT_QUICKSTART.md) for setup instructions.
 
 ---
 
@@ -183,6 +204,26 @@ npm run package-auto
   <img src="./assets/icons/svg/inulute.svg" alt="Inulute" width="70px">
   
 </div>
+
+---
+
+## 📚 DOCUMENTATION
+
+### Core Documentation
+- **[ARCHITECTURE.md](./ARCHITECTURE.md)** - Comprehensive architecture documentation (17KB)
+- **[diagram.puml](./diagram.puml)** - PlantUML architecture diagram
+
+### Enhancement Suite
+- **[ENHANCEMENT_QUICKSTART.md](./ENHANCEMENT_QUICKSTART.md)** - Quick start guide for multi-provider routing (14KB)
+- **[config.example.json](./config.example.json)** - Configuration reference
+- **[.env.example](./.env.example)** - Environment variables template
+
+### Security & Validation
+- **[SECURITY.md](./SECURITY.md)** - Security best practices and hardening (13KB)
+- **[VALIDATION_SUMMARY.md](./VALIDATION_SUMMARY.md)** - Validation results and benchmarks
+
+### CI/CD
+- **[.github/workflows/ci.yml](./.github/workflows/ci.yml)** - Automated build and test pipeline
 
 ---
 
