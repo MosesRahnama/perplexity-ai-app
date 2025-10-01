@@ -1,0 +1,164 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Perplexity AI Desktop App - Provider Configuration",
+  "description": "Configuration for multi-provider AI routing, caching, and decision policies",
+  
+  "server": {
+    "baseUrl": "http://localhost:8000/v1",
+    "description": "Unified AI server endpoint (OpenAI-compatible API)"
+  },
+  
+  "authentication": {
+    "apiKey": "${API_KEY}",
+    "description": "API key for authentication. Use environment variable API_KEY or .env file"
+  },
+  
+  "providers": {
+    "openai": {
+      "enabled": true,
+      "defaultModel": "gpt-4o-mini",
+      "models": [
+        "gpt-4o",
+        "gpt-4o-mini",
+        "gpt-4-turbo",
+        "gpt-3.5-turbo"
+      ]
+    },
+    "anthropic": {
+      "enabled": true,
+      "defaultModel": "claude-3-5-sonnet-20241022",
+      "models": [
+        "claude-3-5-sonnet-20241022",
+        "claude-3-5-haiku-20241022",
+        "claude-3-opus-20240229",
+        "claude-3-sonnet-20240229",
+        "claude-3-haiku-20240307"
+      ]
+    },
+    "vertex": {
+      "enabled": true,
+      "projectId": "kernel-o6",
+      "defaultModel": "gemini-1.5-pro",
+      "models": [
+        "gemini-1.5-pro",
+        "gemini-1.5-flash",
+        "gemini-1.0-pro"
+      ]
+    }
+  },
+  
+  "cache": {
+    "enabled": true,
+    "ttl": 3600000,
+    "ttlDescription": "Time-to-live in milliseconds (default: 1 hour)",
+    "maxSize": 104857600,
+    "maxSizeDescription": "Maximum cache size in bytes (default: 100 MB)",
+    "directory": "auto",
+    "directoryDescription": "Cache directory (auto = app userData folder)"
+  },
+  
+  "routing": {
+    "defaultProvider": "openai",
+    "defaultModel": "gpt-4o-mini",
+    "costLimit": 0.10,
+    "costLimitDescription": "Maximum cost per request in USD",
+    
+    "rules": [
+      {
+        "name": "long-context-tasks",
+        "description": "Route long context (>8k tokens) to Claude",
+        "condition": {
+          "promptLengthMin": 8000
+        },
+        "provider": "anthropic",
+        "model": "claude-3-5-sonnet-20241022",
+        "reason": "long context optimization"
+      },
+      {
+        "name": "speed-critical-tasks",
+        "description": "Route speed-critical tasks to fast models",
+        "condition": {
+          "requiresSpeed": true
+        },
+        "provider": "vertex",
+        "model": "gemini-1.5-flash",
+        "reason": "speed optimization"
+      },
+      {
+        "name": "reasoning-tasks",
+        "description": "Route complex reasoning to GPT-4",
+        "condition": {
+          "requiresReasoning": true,
+          "budgetMax": 0.20
+        },
+        "provider": "openai",
+        "model": "gpt-4o",
+        "reason": "reasoning optimization"
+      },
+      {
+        "name": "budget-constrained",
+        "description": "Use cheapest model for budget-constrained tasks",
+        "condition": {
+          "budgetMax": 0.01
+        },
+        "provider": "anthropic",
+        "model": "claude-3-5-haiku-20241022",
+        "reason": "cost optimization"
+      }
+    ]
+  },
+  
+  "policies": {
+    "rateLimiting": {
+      "enabled": false,
+      "requestsPerMinute": 60,
+      "description": "Not yet implemented"
+    },
+    "fallback": {
+      "enabled": true,
+      "order": ["openai", "anthropic", "vertex"],
+      "description": "Provider fallback order on errors"
+    },
+    "monitoring": {
+      "enabled": true,
+      "logRequests": true,
+      "trackCosts": true
+    }
+  },
+  
+  "security": {
+    "validateInputs": true,
+    "sanitizeOutputs": true,
+    "maxPromptLength": 100000,
+    "maxPromptLengthDescription": "Maximum prompt length in characters"
+  },
+  
+  "telemetry": {
+    "enabled": false,
+    "optedOut": true,
+    "description": "Telemetry is disabled by default for privacy"
+  },
+  
+  "examples": {
+    "basicRequest": {
+      "prompt": "Explain quantum computing in simple terms",
+      "options": {
+        "temperature": 0.7,
+        "max_tokens": 500
+      }
+    },
+    "explicitProvider": {
+      "prompt": "Write a Python function to sort a list",
+      "provider": "openai",
+      "model": "gpt-4o-mini"
+    },
+    "contextBasedRouting": {
+      "prompt": "Analyze this 50-page document...",
+      "context": {
+        "requiresReasoning": false,
+        "requiresSpeed": true,
+        "budget": 0.05
+      }
+    }
+  }
+}

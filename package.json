@@ -18,6 +18,7 @@
   "author": "inulute <inulute@users.noreply.github.com>",
   "license": "GPL-3.0-only",
   "dependencies": {
+    "dotenv": "^17.2.3",
     "electron-clipboard-extended": "^1.1.1",
     "electron-store": "^7.0.3",
     "electron-window-state": "^5.0.3",
