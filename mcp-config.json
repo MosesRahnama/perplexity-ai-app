@@ -1,0 +1,164 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Perplexity AI Desktop App - MCP Server Configuration",
+  "description": "Configuration for Model Context Protocol servers integration",
+  
+  "mcpServers": {
+    "context7": {
+      "type": "sse",
+      "url": "https://mcp-gateway-1028242746308.us-east5.run.app/model_context_protocol/2024-11-05/sse?server=context7",
+      "autoApprove": ["*"],
+      "timeout": 300,
+      "description": "Context management and retrieval server"
+    },
+    "curl": {
+      "type": "sse",
+      "url": "https://mcp-gateway-1028242746308.us-east5.run.app/model_context_protocol/2024-11-05/sse?server=curl",
+      "autoApprove": ["*"],
+      "timeout": 300,
+      "description": "HTTP request and API interaction server"
+    },
+    "deepwiki": {
+      "type": "sse",
+      "url": "https://mcp-gateway-1028242746308.us-east5.run.app/model_context_protocol/2024-11-05/sse?server=deepwiki",
+      "autoApprove": ["*"],
+      "timeout": 300,
+      "description": "Wikipedia and knowledge base search server"
+    },
+    "desktop-commander": {
+      "type": "command",
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "@wonderwhy-er/desktop-commander@latest"],
+      "autoApprove": ["*"],
+      "timeout": 300,
+      "description": "Desktop automation and system control",
+      "priority": "high"
+    },
+    "filesystem": {
+      "type": "command",
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "@modelcontextprotocol/server-filesystem", "C:\\"],
+      "autoApprove": ["*"],
+      "timeout": 300,
+      "description": "File system operations and management",
+      "priority": "high"
+    },
+    "memory": {
+      "type": "command",
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "@modelcontextprotocol/server-memory"],
+      "env": {
+        "MEMORY_FILE_PATH": "C:\\Users\\Moses\\Mina_Servers\\shared_memory\\knowledge_graph.json"
+      },
+      "autoApprove": ["*"],
+      "timeout": 300,
+      "description": "Persistent memory and knowledge graph",
+      "priority": "high"
+    },
+    "notion": {
+      "type": "sse",
+      "url": "https://mcp-gateway-1028242746308.us-east5.run.app/model_context_protocol/2024-11-05/sse?server=notion",
+      "autoApprove": ["*"],
+      "timeout": 300,
+      "description": "Notion workspace integration"
+    },
+    "playwright": {
+      "type": "command",
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "@playwright/mcp@latest"],
+      "autoApprove": ["*"],
+      "timeout": 300,
+      "description": "Browser automation and web interaction",
+      "priority": "high"
+    },
+    "windows-mcp": {
+      "type": "command",
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "C:\\Users\\Moses\\Mina_Servers\\tools\\Windows-MCP",
+        "main.py"
+      ],
+      "autoApprove": ["*"],
+      "timeout": 600,
+      "description": "Windows-specific system operations",
+      "priority": "high"
+    },
+    "puppeteer": {
+      "type": "command",
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "@modelcontextprotocol/server-puppeteer@latest"],
+      "autoApprove": ["*"],
+      "timeout": 300,
+      "description": "Advanced browser automation with Puppeteer",
+      "priority": "medium"
+    },
+    "sequential-thinking": {
+      "type": "sse",
+      "url": "https://mcp-gateway-1028242746308.us-east5.run.app/model_context_protocol/2024-11-05/sse?server=sequential-thinking",
+      "autoApprove": ["*"],
+      "timeout": 300,
+      "description": "Structured reasoning and thinking processes"
+    },
+    "perplexity-ask": {
+      "type": "sse",
+      "url": "https://mcp-gateway-1028242746308.us-east5.run.app/model_context_protocol/2024-11-05/sse?server=perplexity-ask",
+      "autoApprove": ["*"],
+      "timeout": 300,
+      "description": "Perplexity API integration for research"
+    },
+    "google-pse": {
+      "type": "sse",
+      "url": "https://mcp-gateway-1028242746308.us-east5.run.app/model_context_protocol/2024-11-05/sse?server=google-pse",
+      "autoApprove": ["*"],
+      "timeout": 300,
+      "description": "Google Programmable Search Engine integration"
+    },
+    "duckduckgo": {
+      "type": "sse",
+      "url": "https://mcp-gateway-1028242746308.us-east5.run.app/model_context_protocol/2024-11-05/sse?server=duckduckgo",
+      "autoApprove": ["*"],
+      "timeout": 300,
+      "description": "DuckDuckGo search integration"
+    },
+    "github": {
+      "type": "sse",
+      "url": "https://mcp-gateway-1028242746308.us-east5.run.app/model_context_protocol/2024-11-05/sse?server=github",
+      "autoApprove": ["*"],
+      "timeout": 300,
+      "description": "GitHub repository and API integration"
+    },
+    "pieces": {
+      "type": "sse",
+      "url": "http://localhost:39300/model_context_protocol/2024-11-05/sse",
+      "autoApprove": ["*"],
+      "timeout": 300,
+      "description": "Pieces context and code snippet management",
+      "priority": "high",
+      "local": true
+    }
+  },
+  
+  "settings": {
+    "isUsingBuiltInNodeForMcp": true,
+    "connectionTimeout": 30000,
+    "reconnectAttempts": 3,
+    "reconnectDelay": 5000,
+    "enableLogging": true,
+    "logLevel": "info"
+  },
+  
+  "priorities": {
+    "high": ["desktop-commander", "filesystem", "memory", "playwright", "windows-mcp", "pieces"],
+    "medium": ["puppeteer", "notion", "github"],
+    "low": ["context7", "curl", "deepwiki", "sequential-thinking", "perplexity-ask", "google-pse", "duckduckgo"]
+  },
+  
+  "preferences": {
+    "menuBarEnabled": true,
+    "showConnectionStatus": true,
+    "autoRetryFailedConnections": true,
+    "validateToolSchemas": true
+  }
+}
