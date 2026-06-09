@@ -1,9 +1,54 @@
-const { app, BrowserWindow, ipcMain, BrowserView, Menu, globalShortcut, Tray, shell, net, Notification, clipboard, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, BrowserView, Menu, MenuItem, globalShortcut, Tray, shell, net, Notification, clipboard, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const Store = require('electron-store');
 const marked = require('marked');
-const windowStateKeeper = require('electron-window-state'); 
+const windowStateKeeper = require('electron-window-state');
+
+// Migrate settings from older app versions if this is a fresh install
+// Migration chain: perplexity-ai-app → simplexity-ai-app
+(function migrateOldSettings() {
+  try {
+    const appDataBase = app.getPath('appData');
+    const newAppDataDir = app.getPath('userData'); // .../simplexity-ai-app
+    const newConfigPath = path.join(newAppDataDir, 'config.json');
+
+    // Already has config — no migration needed
+    if (fs.existsSync(newConfigPath)) return;
+
+    // Try migrating from simplexity-ai-app first (most recent), then perplexity-ai-app (oldest)
+    const oldDirs = [
+      path.join(appDataBase, 'simplexity-ai-app'),
+      path.join(appDataBase, 'perplexity-ai-app')
+    ];
+
+    for (const oldAppDataDir of oldDirs) {
+      const oldConfigPath = path.join(oldAppDataDir, 'config.json');
+      if (fs.existsSync(oldConfigPath)) {
+        // Ensure new directory exists
+        if (!fs.existsSync(newAppDataDir)) {
+          fs.mkdirSync(newAppDataDir, { recursive: true });
+        }
+
+        // Copy config.json (settings)
+        fs.copyFileSync(oldConfigPath, newConfigPath);
+        console.log(`Migrated settings from ${path.basename(oldAppDataDir)}`);
+
+        // Also copy window-state.json if it exists
+        const oldWindowState = path.join(oldAppDataDir, 'window-state.json');
+        const newWindowState = path.join(newAppDataDir, 'window-state.json');
+        if (fs.existsSync(oldWindowState) && !fs.existsSync(newWindowState)) {
+          fs.copyFileSync(oldWindowState, newWindowState);
+          console.log(`Migrated window state from ${path.basename(oldAppDataDir)}`);
+        }
+        break; // Stop after first successful migration
+      }
+    }
+  } catch (error) {
+    console.error('Settings migration failed (non-fatal):', error.message);
+  }
+})();
+
 const settings = new Store();
 const NotificationManager = require('./notification-manager');
 const SearchService = require('./search-service');
@@ -13,12 +58,13 @@ const isWindows = process.platform === 'win32';
 const isLinux = process.platform === 'linux';
 
 if (process.platform === 'win32') {
-  app.setAppUserModelId("Perplexity AI");
+  app.setAppUserModelId("SimplexityAI");
 }
 
 let mainWindow;
 let currentView;
 let views = {};
+let findBarOpen = false;
 let tray = null;
 let settingsWindow = null;
 let updateWindow = null;
@@ -33,6 +79,7 @@ let autoStartEnabled = settings.get('autoStartEnabled', false);
 let originalClipboardContent = '';
 
 let lastUpdateCheck = 0;
+let shortcutsRegistered = false;
 const UPDATE_CHECK_INTERVAL = 12 * 60 * 60 * 1000; // Check twice per day (every 12 hours)
 
 function configureAutoStart(enable) {
@@ -202,7 +249,7 @@ function registerShortcuts() {
   for (const [key, shortcutData] of Object.entries(shortcuts)) {
     const shortcutKey = typeof shortcutData === 'object' ? shortcutData.key : shortcutData;
     const isEnabled = typeof shortcutData === 'object' ? shortcutData.enabled === true : false;
-    
+
     if (isEnabled && shortcutKey && shortcutActions[key]) {
       try {
         globalShortcut.register(shortcutKey, shortcutActions[key]);
@@ -211,6 +258,7 @@ function registerShortcuts() {
       }
     }
   }
+  shortcutsRegistered = true;
 }
 
 /**
@@ -421,7 +469,68 @@ function createWindow() {
 
   mainWindowState.manage(mainWindow);
 
-  Menu.setApplicationMenu(null);
+  // Application menu with Find and Zoom accelerators (menu bar hidden, accelerators still work)
+  const appMenu = Menu.buildFromTemplate([
+    {
+      label: 'Edit',
+      submenu: [
+        { label: 'Undo', accelerator: 'CmdOrCtrl+Z', role: 'undo' },
+        { label: 'Redo', accelerator: 'CmdOrCtrl+Shift+Z', role: 'redo' },
+        { type: 'separator' },
+        { label: 'Cut', accelerator: 'CmdOrCtrl+X', role: 'cut' },
+        { label: 'Copy', accelerator: 'CmdOrCtrl+C', role: 'copy' },
+        { label: 'Paste', accelerator: 'CmdOrCtrl+V', role: 'paste' },
+        { label: 'Select All', accelerator: 'CmdOrCtrl+A', role: 'selectAll' },
+        { type: 'separator' },
+        {
+          label: 'Find',
+          accelerator: 'CmdOrCtrl+F',
+          click: () => {
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('toggle-find-bar');
+            }
+          }
+        }
+      ]
+    },
+    {
+      label: 'View',
+      submenu: [
+        {
+          label: 'Zoom In',
+          accelerator: 'CmdOrCtrl+=',
+          click: () => {
+            if (currentView) {
+              const current = currentView.webContents.getZoomLevel();
+              currentView.webContents.setZoomLevel(current + 0.5);
+            }
+          }
+        },
+        {
+          label: 'Zoom Out',
+          accelerator: 'CmdOrCtrl+-',
+          click: () => {
+            if (currentView) {
+              const current = currentView.webContents.getZoomLevel();
+              currentView.webContents.setZoomLevel(current - 0.5);
+            }
+          }
+        },
+        { type: 'separator' },
+        {
+          label: 'Reset Zoom',
+          accelerator: 'CmdOrCtrl+0',
+          click: () => {
+            if (currentView) {
+              currentView.webContents.setZoomLevel(0);
+            }
+          }
+        }
+      ]
+    }
+  ]);
+  Menu.setApplicationMenu(appMenu);
+  mainWindow.setMenuBarVisibility(false);
 
   mainWindow.loadFile('index.html').catch(console.error);
 
@@ -448,32 +557,59 @@ function createWindow() {
 
   mainWindow.on('focus', () => {
     setTimeout(() => adjustViewBounds(), 200);
+    if (!settingsWindow) {
+      reattachShortcuts();
+    }
   });
 
   mainWindow.on('restore', () => {
     setTimeout(() => adjustViewBounds(), 200);
+    if (!settingsWindow) {
+      reattachShortcuts();
+    }
   });
 
   mainWindow.on('show', () => {
     setTimeout(() => adjustViewBounds(), 200);
     startLayoutChecks();
+    if (!settingsWindow) {
+      reattachShortcuts();
+    }
+  });
+
+  mainWindow.on('blur', () => {
+    detachAllShortcuts();
+  });
+
+  mainWindow.on('minimize', () => {
+    detachAllShortcuts();
+  });
+
+  mainWindow.on('hide', () => {
+    detachAllShortcuts();
   });
 
   mainWindow.on('close', (event) => {
     if (app.isQuitting) {
       return;
     }
-    
-    event.preventDefault();
-    mainWindow.hide();
-    
-    if (!settings.get('hasShownTrayNotification', false)) {
-      const notification = new Notification({
-        title: 'Perplexity AI',
-        body: 'Application is now running in the system tray'
-      });
-      notification.show();
-      settings.set('hasShownTrayNotification', true);
+
+    const closeToTray = settings.get('closeToTray', true);
+
+    if (closeToTray) {
+      event.preventDefault();
+      mainWindow.hide();
+
+      if (!settings.get('hasShownTrayNotification', false)) {
+        const notification = new Notification({
+          title: 'SimplexityAI',
+          body: 'Application is now running in the system tray'
+        });
+        notification.show();
+        settings.set('hasShownTrayNotification', true);
+      }
+    } else {
+      app.isQuitting = true;
     }
   });
   
@@ -500,21 +636,26 @@ function adjustViewBounds() {
   if (currentView && mainWindow) {
     const bounds = mainWindow.getContentBounds();
     const sidebarWidth = 60;
-    
+    const findBarHeight = findBarOpen ? 36 : 0;
+
     const viewWidth = Math.max(bounds.width - sidebarWidth, 500);
-    const viewHeight = Math.max(bounds.height, 400);
-    
+    const viewHeight = Math.max(bounds.height - findBarHeight, 400);
+
     currentView.setBounds({
       x: sidebarWidth,
-      y: 0,
+      y: findBarHeight,
       width: viewWidth,
       height: viewHeight,
     });
-    
+
     if (process.platform === 'win32' && mainWindow.isVisible() && !mainWindow.isMinimized()) {
       mainWindow.webContents.invalidate();
     }
   }
+}
+
+function isCtrlEnterToSendEnabled() {
+  return settings.get('ctrlEnterToSend', false);
 }
 
 function switchView(url) {
@@ -567,20 +708,17 @@ function switchView(url) {
       webPreferences: {
         contextIsolation: true,
         preload: path.join(__dirname, 'src', 'js', 'preload', 'preload_inject.js'),
-        backgroundThrottling: true, 
+        backgroundThrottling: true,
         worldSafeExecuteJavaScript: true,
         sandbox: false,
-        webgl: true, 
+        spellcheck: true,
+        webgl: true,
         enableWebSQL: false,
         // Memory optimization settings
-        disableBlinkFeatures: 'Accelerated2dCanvas', 
-        enableBlinkFeatures: 'PaintHolding', 
+        disableBlinkFeatures: 'Accelerated2dCanvas',
+        enableBlinkFeatures: 'PaintHolding',
       },
     });
-    
-    if (currentView.webContents.setVisualZoomLevelLimits) {
-      currentView.webContents.setVisualZoomLevelLimits(1, 1); 
-    }
     
    
     if (currentView.webContents.setBackgroundThrottling) {
@@ -598,8 +736,166 @@ function switchView(url) {
     views[url] = currentView;
 
     currentView.webContents.setWindowOpenHandler(({ url }) => {
-      shell.openExternal(url); 
+      shell.openExternal(url);
       return { action: 'deny' };
+    });
+
+    // Context menu with spell check, copy link, and standard editing
+    const viewRef = currentView;
+    viewRef.webContents.on('context-menu', (event, params) => {
+      const menuItems = [];
+
+      // Spell check suggestions first (most actionable)
+      if (params.dictionarySuggestions && params.dictionarySuggestions.length > 0) {
+        for (const suggestion of params.dictionarySuggestions) {
+          menuItems.push({
+            label: suggestion,
+            click: () => viewRef.webContents.replaceMisspelling(suggestion)
+          });
+        }
+        menuItems.push({ type: 'separator' });
+      }
+
+      if (params.misspelledWord) {
+        menuItems.push({
+          label: 'Add to dictionary',
+          click: () => viewRef.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord)
+        });
+        menuItems.push({ type: 'separator' });
+      }
+
+      // Only show editing options that are actually available
+      if (params.editFlags.canCut) {
+        menuItems.push({ label: 'Cut', role: 'cut' });
+      }
+      if (params.selectionText.trim().length > 0) {
+        menuItems.push({ label: 'Copy', role: 'copy' });
+      }
+      if (params.editFlags.canPaste) {
+        menuItems.push({ label: 'Paste', role: 'paste' });
+      }
+      if (params.editFlags.canSelectAll) {
+        menuItems.push({ label: 'Select All', role: 'selectAll' });
+      }
+
+      // Copy Link (only visible when right-clicking a link)
+      if (params.linkURL) {
+        if (menuItems.length > 0) {
+          menuItems.push({ type: 'separator' });
+        }
+        menuItems.push({
+          label: 'Copy Link',
+          click: () => clipboard.writeText(params.linkURL)
+        });
+      }
+
+      if (menuItems.length > 0) {
+        const menu = Menu.buildFromTemplate(menuItems);
+        menu.popup(mainWindow);
+      }
+    });
+
+    // Forward find-in-page results to the main window renderer
+    viewRef.webContents.on('found-in-page', (event, result) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('find-result', {
+          activeMatchOrdinal: result.activeMatchOrdinal,
+          matches: result.matches
+        });
+      }
+    });
+
+    // Intercept keyboard shortcuts at the BrowserView level before the website can handle them
+    let sendingEnter = false;
+    viewRef.webContents.on('before-input-event', (event, input) => {
+      if (input.type !== 'keyDown') return;
+
+      const key = input.key.toLowerCase();
+
+      // Ctrl+Enter to Send: block plain Enter in textarea, allow Ctrl+Enter
+      if (key === 'enter' && isCtrlEnterToSendEnabled() && !sendingEnter) {
+        const mod = process.platform === 'darwin' ? input.meta : input.control;
+
+        // Shift+Enter → allow default (newline)
+        if (input.shift) {
+          // let it through
+        }
+        // Ctrl/Cmd+Enter → submit by sending a clean Enter keypress
+        else if (mod) {
+          event.preventDefault();
+          // Send a raw Enter key without modifiers so Perplexity sees a normal Enter (submit)
+          sendingEnter = true;
+          viewRef.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' });
+          viewRef.webContents.sendInputEvent({ type: 'char', keyCode: '\r' });
+          viewRef.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' });
+          sendingEnter = false;
+        }
+        // Plain Enter → block and insert newline
+        else {
+          event.preventDefault();
+          viewRef.webContents.executeJavaScript(`
+            (function() {
+              const ta = document.activeElement;
+              if (ta && ta.tagName === 'TEXTAREA') {
+                const start = ta.selectionStart;
+                const end = ta.selectionEnd;
+                // Use native input setter to update React state
+                const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                  window.HTMLTextAreaElement.prototype, 'value'
+                ).set;
+                nativeInputValueSetter.call(ta, ta.value.substring(0, start) + '\\n' + ta.value.substring(end));
+                ta.selectionStart = ta.selectionEnd = start + 1;
+                ta.dispatchEvent(new Event('input', { bubbles: true }));
+              }
+            })();
+          `).catch(() => {});
+        }
+        return;
+      }
+
+      // Escape → close find bar if open
+      if (key === 'escape' && findBarOpen) {
+        event.preventDefault();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('toggle-find-bar');
+        }
+        return;
+      }
+
+      const mod = process.platform === 'darwin' ? input.meta : input.control;
+      if (!mod) return;
+
+      // Ctrl/Cmd+F → toggle find bar
+      if (key === 'f' && !input.alt && !input.shift) {
+        event.preventDefault();
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('toggle-find-bar');
+        }
+        return;
+      }
+
+      // Ctrl/Cmd+= or Ctrl/Cmd+Shift+= → zoom in
+      if (key === '=' || key === '+') {
+        event.preventDefault();
+        const current = viewRef.webContents.getZoomLevel();
+        viewRef.webContents.setZoomLevel(current + 0.5);
+        return;
+      }
+
+      // Ctrl/Cmd+- → zoom out
+      if (key === '-') {
+        event.preventDefault();
+        const current = viewRef.webContents.getZoomLevel();
+        viewRef.webContents.setZoomLevel(current - 0.5);
+        return;
+      }
+
+      // Ctrl/Cmd+0 → reset zoom
+      if (key === '0') {
+        event.preventDefault();
+        viewRef.webContents.setZoomLevel(0);
+        return;
+      }
     });
 
     currentView.webContents.on('did-finish-load', () => {
@@ -613,13 +909,14 @@ function switchView(url) {
           nagScreenSelectors.forEach((selector) => {
             document.querySelectorAll(selector).forEach((el) => el.remove());
           });
-          
+
           // Add CSS to optimize rendering performance
           const style = document.createElement('style');
           style.textContent = 'img { will-change: auto !important; } .will-change-transform { will-change: auto !important; }';
           document.head.appendChild(style);
         })();
       `);
+
     });
 
     currentView.webContents.on('did-start-loading', () => {
@@ -673,7 +970,7 @@ function createTray() {
 
   try {
     tray = new Tray(iconPath);
-    tray.setToolTip('Perplexity AI');
+    tray.setToolTip('SimplexityAI');
 
     const contextMenu = Menu.buildFromTemplate([
       { 
@@ -748,7 +1045,7 @@ ipcMain.on('remind-tomorrow-update', () => {
 });
 
 ipcMain.on('download-update', () => {
-  const downloadUrl = 'https://github.com/inulute/perplexity-ai-app/releases/latest';
+  const downloadUrl = 'https://github.com/inulute/simplexity-ai-app/releases/latest';
   
   shell.openExternal(downloadUrl);
   
@@ -778,14 +1075,14 @@ function performUpdateCheck(currentVersion, retryCount) {
   const maxRetries = 3;
   
   const timestamp = Date.now();
-  const url = `https://raw.githubusercontent.com/inulute/perplexity-ai-app/main/package.json?_=${timestamp}`;
+  const url = `https://raw.githubusercontent.com/inulute/simplexity-ai-app/main/package.json?_=${timestamp}`;
   
   const request = net.request({
     url: url,
     method: 'GET'
   });
   
-  request.setHeader('User-Agent', `PerplexityAIDesktop/${currentVersion}`);
+  request.setHeader('User-Agent', `SimplexityAIDesktop/${currentVersion}`);
   
   let timeoutId = setTimeout(() => {
     console.error('Update check timed out');
@@ -897,11 +1194,16 @@ function showUpdateWindow(latestVersion) {
 }
 
 function detachAllShortcuts() {
-  globalShortcut.unregisterAll();
+  if (shortcutsRegistered) {
+    globalShortcut.unregisterAll();
+    shortcutsRegistered = false;
+  }
 }
 
 function reattachShortcuts() {
-  registerShortcuts();
+  if (!shortcutsRegistered) {
+    registerShortcuts();
+  }
 }
 
 app.on('second-instance', (event, commandLine, workingDirectory) => {
@@ -986,7 +1288,15 @@ ipcMain.on('set-settings', (event, data) => {
   if (data.autoStartEnabled !== undefined) {
     configureAutoStart(data.autoStartEnabled);
   }
-  
+
+  if (data.closeToTray !== undefined) {
+    settings.set('closeToTray', data.closeToTray);
+  }
+
+  if (data.ctrlEnterToSend !== undefined) {
+    settings.set('ctrlEnterToSend', data.ctrlEnterToSend);
+  }
+
   reattachShortcuts();
 });
 
@@ -995,7 +1305,9 @@ ipcMain.on('get-settings', (event) => {
     shortcuts,
     defaultAI: settings.get('defaultAI', 'https://perplexity.ai'),
     disableHardwareAcceleration: settings.get('disableHardwareAcceleration', false),
-    autoStartEnabled: autoStartEnabled
+    autoStartEnabled: autoStartEnabled,
+    closeToTray: settings.get('closeToTray', true),
+    ctrlEnterToSend: settings.get('ctrlEnterToSend', false)
   };
   event.sender.send('settings', data);
 });
@@ -1107,6 +1419,33 @@ ipcMain.handle('get-notification-content', async (event, id, fromPanel = false) 
 ipcMain.on('perform-quick-search', (event, searchText) => {
   if (searchService) {
     searchService.performSearch(searchText);
+  }
+});
+
+// Find bar state management
+ipcMain.on('find-bar-opened', () => {
+  findBarOpen = true;
+  adjustViewBounds();
+});
+
+ipcMain.on('find-bar-closed', () => {
+  findBarOpen = false;
+  adjustViewBounds();
+});
+
+// Find in page
+ipcMain.on('find-in-page', (event, text, options) => {
+  if (currentView && text) {
+    currentView.webContents.findInPage(text, {
+      forward: options.forward !== false,
+      matchCase: false
+    });
+  }
+});
+
+ipcMain.on('stop-find-in-page', (event, action) => {
+  if (currentView) {
+    currentView.webContents.stopFindInPage(action || 'clearSelection');
   }
 });
 
