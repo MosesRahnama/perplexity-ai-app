@@ -4,7 +4,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (document.getElementById('settings-container')) {
     const shortcutFields = {
       perplexityAI: document.getElementById('shortcut-perplexityAI'),
-      perplexityLabs: document.getElementById('shortcut-perplexityLabs'),
+      secondTab: document.getElementById('shortcut-secondTab'),
       sendToTray: document.getElementById('shortcut-sendToTray'),
       restoreApp: document.getElementById('shortcut-restoreApp'),
       quickSearch: document.getElementById('shortcut-quickSearch'),
@@ -13,7 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
     const shortcutToggles = {
       perplexityAI: document.getElementById('toggle-perplexityAI'),
-      perplexityLabs: document.getElementById('toggle-perplexityLabs'),
+      secondTab: document.getElementById('toggle-secondTab'),
       sendToTray: document.getElementById('toggle-sendToTray'),
       restoreApp: document.getElementById('toggle-restoreApp'),
       quickSearch: document.getElementById('toggle-quickSearch'),
@@ -64,9 +64,8 @@ document.addEventListener('DOMContentLoaded', () => {
           enabled: isEnabled
         };
       } else {
-        const defaultKey = isMac ? 
-          getDefaultMacShortcut(key) : 
-          getDefaultWindowsShortcut(key);
+        // Main already resolved the platform when it built the table.
+        const defaultKey = defaultShortcutKey(key);
         
         newShortcuts[key] = {
           key: defaultKey,
@@ -138,10 +137,14 @@ document.addEventListener('DOMContentLoaded', () => {
       newShortcuts = { ...processedShortcuts };
       savedShortcuts = { ...processedShortcuts };
     
+      if (data.defaultShortcuts) {
+        window.__defaultShortcuts = data.defaultShortcuts;
+      }
+
       loadCurrentShortcuts();
       
       if (defaultAISelect) {
-        defaultAISelect.value = data.defaultAI || 'https://perplexity.ai';
+        defaultAISelect.value = data.defaultAI || 'tab1';
       }
       
       const autostartToggle = document.getElementById('toggle-autostart');
@@ -152,6 +155,16 @@ document.addEventListener('DOMContentLoaded', () => {
           window.electronAPI.toggleAutostart(event.target.checked);
         });
       }
+
+      const restoreLastSessionToggle = document.getElementById('toggle-restoreLastSession');
+      if (restoreLastSessionToggle) {
+        restoreLastSessionToggle.checked = data.restoreLastSession !== false;
+      }
+
+      const chosenShortcuts = Array.isArray(data.sidebarShortcuts) ? data.sidebarShortcuts : [];
+      document.querySelectorAll('.sidebar-shortcut').forEach((box) => {
+        box.checked = chosenShortcuts.includes(box.value);
+      });
 
       const closeToTrayToggle = document.getElementById('toggle-closeToTray');
       if (closeToTrayToggle) {
@@ -279,23 +292,9 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     document.getElementById('restore-button').addEventListener('click', () => {
-      const defaultShortcuts = isMac
-        ? {
-            perplexityAI: { key: 'Command+1', enabled: false },
-            perplexityLabs: { key: 'Command+2', enabled: false },
-            sendToTray: { key: 'Command+T', enabled: false },
-            restoreApp: { key: 'Command+Shift+T', enabled: false },
-            quickSearch: { key: 'Command+Shift+X', enabled: false },
-            customPrefixSearch: { key: 'Command+Shift+D', enabled: false }
-          }
-        : {
-            perplexityAI: { key: 'Control+1', enabled: false },
-            perplexityLabs: { key: 'Control+2', enabled: false },
-            sendToTray: { key: 'Alt+Shift+W', enabled: false },
-            restoreApp: { key: 'Alt+Shift+Q', enabled: false },
-            quickSearch: { key: 'Alt+Shift+X', enabled: false },
-            customPrefixSearch: { key: 'Alt+Shift+D', enabled: false }
-          };
+      // Defaults come from the main process, which is the only place they are
+      // defined. Keeping a second copy here is how the two drifted apart.
+      const defaultShortcuts = window.__defaultShortcuts || {};
 
       newShortcuts = { ...defaultShortcuts };
       savedShortcuts = { ...defaultShortcuts };
@@ -307,6 +306,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (checkForDuplicates(true)) {
         const autostartToggle = document.getElementById('toggle-autostart');
         
+        const restoreLastSessionToggle = document.getElementById('toggle-restoreLastSession');
         const closeToTrayToggle = document.getElementById('toggle-closeToTray');
         const ctrlEnterToSendToggle = document.getElementById('toggle-ctrlEnterToSend');
 
@@ -317,6 +317,10 @@ document.addEventListener('DOMContentLoaded', () => {
             ? document.getElementById('toggle-hardware-acceleration').checked
             : false,
           autoStartEnabled: autostartToggle ? autostartToggle.checked : false,
+          restoreLastSession: restoreLastSessionToggle ? restoreLastSessionToggle.checked : true,
+          sidebarShortcuts: [...document.querySelectorAll('.sidebar-shortcut')]
+            .filter((box) => box.checked)
+            .map((box) => box.value),
           closeToTray: closeToTrayToggle ? closeToTrayToggle.checked : true,
           ctrlEnterToSend: ctrlEnterToSendToggle ? ctrlEnterToSendToggle.checked : false
         };
@@ -410,10 +414,15 @@ document.addEventListener('DOMContentLoaded', () => {
       return [...modifiers, key].join('+').toLowerCase();
     }
 
+    function defaultShortcutKey(key) {
+      const defaults = window.__defaultShortcuts || {};
+      return (defaults[key] && defaults[key].key) || '';
+    }
+
     function getFriendlyName(key) {
       const nameMap = {
         perplexityAI: 'AI Search',
-        perplexityLabs: 'AI Labs',
+        secondTab: 'Second Tab',
         sendToTray: 'Send to Tray',
         restoreApp: 'Restore App',
         quickSearch: 'Quick Search',
@@ -422,29 +431,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return nameMap[key] || key;
     }
     
-    function getDefaultMacShortcut(key) {
-      const defaults = {
-        perplexityAI: 'Command+1',
-        perplexityLabs: 'Command+2',
-        sendToTray: 'Command+T',
-        restoreApp: 'Command+Shift+T',
-        quickSearch: 'Command+Shift+P',
-        customPrefixSearch: 'Command+Shift+C'
-      };
-      return defaults[key] || '';
-    }
     
-    function getDefaultWindowsShortcut(key) {
-      const defaults = {
-        perplexityAI: 'Control+1',
-        perplexityLabs: 'Control+2',
-        sendToTray: 'Alt+Shift+W',
-        restoreApp: 'Alt+Shift+Q',
-        quickSearch: 'Alt+Shift+X',
-        customPrefixSearch: 'Alt+Shift+D'
-      };
-      return defaults[key] || '';
-    }
   } else if (document.getElementById('prefix-search-container')) {
     const prefixButtons = document.querySelectorAll('.prefix-button');
     const selectedTextElement = document.getElementById('selected-text');
@@ -528,21 +515,21 @@ function closeSettings() {
 }
 
 function initNavigationButtons() {
-  const perplexityAIButton = document.querySelector('.menu-item[onclick*="perplexity.ai"]');
-  const perplexityLabsButton = document.querySelector('.menu-item[onclick*="labs.perplexity.ai"]');
+  const perplexityAIButton = document.getElementById('tab1-button');
+  const secondTabButton = document.getElementById('tab2-button');
   const refreshButton = document.querySelector('.menu-item[onclick*="refresh"]');
   
   if (perplexityAIButton) {
     perplexityAIButton.addEventListener('click', (event) => {
       event.preventDefault();
-      window.electronAPI.switchAITool('https://perplexity.ai');
+      window.electronAPI.switchAITool('tab1');
     });
   }
-  
-  if (perplexityLabsButton) {
-    perplexityLabsButton.addEventListener('click', (event) => {
+
+  if (secondTabButton) {
+    secondTabButton.addEventListener('click', (event) => {
       event.preventDefault();
-      window.electronAPI.switchAITool('https://labs.perplexity.ai');
+      window.electronAPI.switchAITool('tab2');
     });
   }
   

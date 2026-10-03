@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, BrowserView, Menu, MenuItem, globalShortcut, Tray, shell, net, Notification, clipboard, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, BrowserView, Menu, MenuItem, globalShortcut, Tray, nativeImage, shell, net, Notification, clipboard, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const Store = require('electron-store');
@@ -63,7 +63,24 @@ if (process.platform === 'win32') {
 
 let mainWindow;
 let currentView;
+
+// Two independent Perplexity workspaces. `views` is keyed by TAB ID, not by
+// URL: keying by URL meant two tabs pointing at the same site collapsed onto a
+// single cached BrowserView, so switching between them did nothing. Keying by
+// tab identity gives each tab its own BrowserView, and therefore its own
+// navigation history, scroll position and in-flight conversation.
+// Both tabs use the default Electron session, so cookies and localStorage --
+// and therefore the Perplexity login -- are shared between them.
+const TABS = [
+  { id: 'tab1', label: 'AI Search', home: 'https://perplexity.ai' },
+  { id: 'tab2', label: 'Second Tab', home: 'https://perplexity.ai' }
+];
+const DEFAULT_TAB_ID = TABS[0].id;
+const isTabId = (value) => TABS.some((tab) => tab.id === value);
+const tabHome = (tabId) => (TABS.find((tab) => tab.id === tabId) || TABS[0]).home;
+
 let views = {};
+let activeTabId = DEFAULT_TAB_ID;
 let findBarOpen = false;
 let tray = null;
 let settingsWindow = null;
@@ -170,15 +187,15 @@ function processCommandLineArgs(argv) {
 const defaultShortcuts = isMac
   ? {
       perplexityAI: { key: 'Command+1', enabled: false },
-      perplexityLabs: { key: 'Command+2', enabled: false },
-      sendToTray: { key: 'Command+W', enabled: false },
-      restoreApp: { key: 'Command+Shift+Q', enabled: false },
+      secondTab: { key: 'Command+2', enabled: false },
+      sendToTray: { key: 'Command+Shift+W', enabled: false },
+      restoreApp: { key: 'Command+Shift+T', enabled: false },
       quickSearch: { key: 'Command+Shift+P', enabled: false },
       customPrefixSearch: { key: 'Command+Shift+C', enabled: false }
     }
   : {
       perplexityAI: { key: 'Control+1', enabled: false },
-      perplexityLabs: { key: 'Control+2', enabled: false },
+      secondTab: { key: 'Control+2', enabled: false },
       sendToTray: { key: 'Alt+Shift+W', enabled: false },
       restoreApp: { key: 'Alt+Shift+Q', enabled: false },
       quickSearch: { key: 'Alt+Shift+X', enabled: false },
@@ -203,6 +220,18 @@ function ensureShortcutsFormat() {
     settings.set('shortcuts', shortcuts);
   }
   
+  let hasAddedShortcuts = false;
+  for (const [key, value] of Object.entries(defaultShortcuts)) {
+    if (!shortcuts[key]) {
+      shortcuts[key] = { ...value };
+      hasAddedShortcuts = true;
+    }
+  }
+
+  if (hasAddedShortcuts) {
+    settings.set('shortcuts', shortcuts);
+  }
+
   const validShortcutKeys = Object.keys(defaultShortcuts);
   let hasRemovedShortcuts = false;
   
@@ -224,8 +253,8 @@ function registerShortcuts() {
   globalShortcut.unregisterAll();
 
   const shortcutActions = {
-    perplexityAI: () => switchView('https://perplexity.ai'),
-    perplexityLabs: () => switchView('https://labs.perplexity.ai'),
+    perplexityAI: () => switchView('tab1'),
+    secondTab: () => switchView('tab2'),
     sendToTray: () => mainWindow.hide(),
     restoreApp: () => {
       if (mainWindow.isMinimized() || !mainWindow.isVisible()) {
@@ -575,6 +604,9 @@ function createWindow() {
     if (!settingsWindow) {
       reattachShortcuts();
     }
+    // Toggling the window from a hotkey is the case in #46: the app reappears
+    // and the caret should be ready to type, not on the sidebar.
+    if (!settingsWindow) setTimeout(focusComposer, 250);
   });
 
   mainWindow.on('blur', () => {
@@ -627,9 +659,28 @@ app.on('before-quit', () => {
   }
 });
 
+// `defaultAI` now stores a tab id rather than a URL. Older installs may hold a
+// URL, including the dead labs.perplexity.ai destination (it 301s to
+// playground.perplexity.ai and then to the generic www.perplexity.ai homepage),
+// so map any legacy value onto a real tab and persist the migration.
+function normalizeDefaultAI(value) {
+  if (isTabId(value)) return value;
+
+  if (typeof value === 'string' && value.includes('labs.perplexity.ai')) {
+    settings.set('defaultAI', DEFAULT_TAB_ID);
+    return DEFAULT_TAB_ID;
+  }
+
+  if (typeof value === 'string' && value.startsWith('http')) {
+    settings.set('defaultAI', DEFAULT_TAB_ID);
+    return DEFAULT_TAB_ID;
+  }
+
+  return DEFAULT_TAB_ID;
+}
+
 function loadDefaultAI() {
-  const defaultAI = settings.get('defaultAI', 'https://perplexity.ai');
-  switchView(defaultAI);
+  switchView(normalizeDefaultAI(settings.get('defaultAI', DEFAULT_TAB_ID)));
 }
 
 function adjustViewBounds() {
@@ -654,55 +705,122 @@ function adjustViewBounds() {
   }
 }
 
+// Each tab remembers the page it was last on, so reopening the app puts you
+// back where you left off instead of dropping you on whatever perplexity.ai
+// happens to land on that week. Only perplexity.ai pages are restored, so a
+// stale or hostile stored value cannot send a tab somewhere unexpected.
+function isRestorableUrl(url) {
+  if (typeof url !== 'string') return false;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    return host === 'perplexity.ai' || host.endsWith('.perplexity.ai');
+  } catch {
+    return false;
+  }
+}
+
+function rememberTabUrl(tabId, url) {
+  if (!isTabId(tabId) || !isRestorableUrl(url)) return;
+  const stored = settings.get('tabUrls', {});
+  if (stored[tabId] === url) return;
+  stored[tabId] = url;
+  settings.set('tabUrls', stored);
+}
+
+function restoredTabUrl(tabId) {
+  if (settings.get('restoreLastSession', true) !== true) return tabHome(tabId);
+  const stored = settings.get('tabUrls', {});
+  return isRestorableUrl(stored[tabId]) ? stored[tabId] : tabHome(tabId);
+}
+
+// Issue #46: every focus() call in this file targets mainWindow, which is the
+// sidebar renderer, so opening the app parked the caret on the sidebar links
+// and Tab could not reach the page. Focus the BrowserView and put the caret in
+// the composer instead. Selectors are tried in order because Perplexity's
+// markup changes; if none match we still leave focus on the page rather than
+// the sidebar, which is already the improvement being asked for.
+function focusComposer() {
+  const view = views[activeTabId] || currentView;
+  if (!view || view.webContents.isDestroyed()) return;
+
+  view.webContents.focus();
+  view.webContents.executeJavaScript(`
+    (function focusComposer() {
+      const selectors = [
+        'textarea:not([readonly]):not([disabled])',
+        'div[contenteditable="true"]',
+        'input[type="search"]:not([readonly]):not([disabled])'
+      ];
+      for (const selector of selectors) {
+        for (const el of document.querySelectorAll(selector)) {
+          const rect = el.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            el.focus();
+            if (typeof el.setSelectionRange === 'function' && typeof el.value === 'string') {
+              el.setSelectionRange(el.value.length, el.value.length);
+            }
+            return true;
+          }
+        }
+      }
+      return false;
+    })();
+  `).catch(() => {});
+}
+
 function isCtrlEnterToSendEnabled() {
   return settings.get('ctrlEnterToSend', false);
 }
 
-function switchView(url) {
-  if (url === 'refresh' && currentView) {
-    
-    const currentUrl = currentView.webContents.getURL();
-    let baseUrl;
-    
-    if (currentUrl.includes('labs.perplexity.ai')) {
-      baseUrl = 'https://labs.perplexity.ai';
-    } else if (currentUrl.includes('perplexity.ai')) {
-      baseUrl = 'https://perplexity.ai';
-    } else {
-      baseUrl = settings.get('defaultAI', 'https://perplexity.ai');
+// Accepts a tab id ('tab1' / 'tab2'), 'refresh', 'search:<query>', or a plain
+// URL. Tab ids switch between the persistent tabs; anything that navigates
+// (quick search, the donate link) is loaded into whichever tab is active, the
+// same way a browser opens a link in the current tab.
+function switchView(target) {
+  if (target === 'refresh') {
+    const activeView = views[activeTabId] || currentView;
+    if (activeView) {
+      const home = tabHome(activeTabId);
+      console.log(`Refreshing ${activeTabId} to base URL: ${home}`);
+      activeView.webContents.loadURL(home);
     }
-    
-    console.log(`Refreshing to base URL: ${baseUrl}`);
-    currentView.webContents.loadURL(baseUrl);
     return;
   }
+
+  let tabId;
+  let navigateTo = null;
+
+  if (isTabId(target)) {
+    tabId = target;
+  } else if (typeof target === 'string' && target.startsWith('search:')) {
+    const searchQuery = target.substring(7).trim();
+    tabId = activeTabId;
+    navigateTo = searchQuery
+      ? `https://www.perplexity.ai/search?q=${encodeURIComponent(searchQuery)}`
+      : tabHome(tabId);
+  } else if (typeof target === 'string' && target.startsWith('http')) {
+    tabId = activeTabId;
+    navigateTo = target;
+  } else {
+    tabId = DEFAULT_TAB_ID;
+  }
+
+  const url = navigateTo || restoredTabUrl(tabId);
 
   if (currentView) {
     mainWindow.removeBrowserView(currentView);
   }
 
-  if (url.startsWith('search:')) {
-    const searchQuery = url.substring(7).trim();
-    if (searchQuery) {
-      url = `https://www.perplexity.ai/search?q=${encodeURIComponent(searchQuery)}`;
-    } else {
-      url = 'https://perplexity.ai';
+  // No eviction here any more. `views` holds exactly the fixed set of tabs, so
+  // the old maxCachedViews sweep could only ever destroy a live tab.
+  if (views[tabId]) {
+    currentView = views[tabId];
+    activeTabId = tabId;
+    if (navigateTo) {
+      currentView.webContents.loadURL(navigateTo);
     }
-  }
-
-  const maxCachedViews = 2; 
-  const viewUrls = Object.keys(views);
-  if (viewUrls.length > maxCachedViews && !views[url]) {
-    const oldestUrl = viewUrls[0];
-    const oldView = views[oldestUrl];
-    if (oldView) {
-      oldView.webContents.destroy();
-    }
-    delete views[oldestUrl];
-  }
-
-  if (views[url]) {
-    currentView = views[url];
   } else {
     currentView = new BrowserView({
       webPreferences: {
@@ -733,7 +851,13 @@ function switchView(url) {
     }
     
     currentView.webContents.loadURL(url);
-    views[url] = currentView;
+    views[tabId] = currentView;
+    activeTabId = tabId;
+
+    const trackedTabId = tabId;
+    const track = () => rememberTabUrl(trackedTabId, currentView.webContents.getURL());
+    currentView.webContents.on('did-navigate', track);
+    currentView.webContents.on('did-navigate-in-page', track);
 
     currentView.webContents.setWindowOpenHandler(({ url }) => {
       shell.openExternal(url);
@@ -899,6 +1023,9 @@ function switchView(url) {
     });
 
     currentView.webContents.on('did-finish-load', () => {
+      // The page owns focus from here; without this the sidebar keeps it.
+      if (views[activeTabId] === currentView) setTimeout(focusComposer, 150);
+
       currentView.webContents.executeJavaScript(`
         (function removeNagScreens() {
           const nagScreenSelectors = [
@@ -930,26 +1057,22 @@ function switchView(url) {
 
   mainWindow.addBrowserView(currentView);
   adjustViewBounds();
+  // Switching tabs should hand the caret to the page you switched to. A new
+  // view has not loaded yet, so did-finish-load covers that case instead.
+  if (!currentView.webContents.isLoading()) setTimeout(focusComposer, 50);
 }
 
 function cleanupUnusedResources() {
   if (global.gc) {
     global.gc();
   }
-  
-  const currentTime = Date.now();
-  const viewUrls = Object.keys(views);
-  
-  for (const url of viewUrls) {
-    if (views[url] === currentView) continue;
-    
-    if (!views[url].lastAccessTime || (currentTime - views[url].lastAccessTime > 300000)) {
-      if (views[url].webContents) {
-        views[url].webContents.destroy();
-      }
-      delete views[url];
-    }
-  }
+
+  // This used to destroy every view that was not the current one, gated on a
+  // `lastAccessTime` property that nothing ever assigned -- so the condition
+  // was always true and any backgrounded view was torn down on the next sweep.
+  // `views` now holds exactly the persistent tabs, whose whole purpose is to
+  // keep their state while backgrounded, so there is nothing here to reclaim.
+  // Idle cost is already bounded by backgroundThrottling on each view.
 }
 
 function createTray() {
@@ -957,9 +1080,10 @@ function createTray() {
 
   if (isWindows) {
     iconPath = path.join(__dirname, 'assets', 'icons', 'win', 'icon.ico');
-  } else if (isMac) {
-    iconPath = path.join(__dirname, 'assets', 'icons', 'mac', 'favicon.icns');
   } else {
+    // favicon.icns only carries an "ic10" (1024px) representation, which
+    // nativeImage cannot decode -- it returns an empty image and `new Tray()`
+    // throws, leaving macOS with no tray icon at all. Use the PNG instead.
     iconPath = path.join(__dirname, 'assets', 'icons', 'png', 'favicon.png');
   }
 
@@ -969,7 +1093,21 @@ function createTray() {
   }
 
   try {
-    tray = new Tray(iconPath);
+    let trayIcon = iconPath;
+    if (isMac) {
+      // The source PNG is ~1058px; the macOS menu bar wants 16pt. Build it as a
+      // 32px bitmap tagged scaleFactor 2 so it stays sharp on Retina displays.
+      const source = nativeImage.createFromPath(iconPath);
+      trayIcon = nativeImage.createFromBuffer(
+        source.resize({ width: 32, height: 32 }).toPNG(),
+        { scaleFactor: 2 }
+      );
+      if (trayIcon.isEmpty()) {
+        trayIcon = source.resize({ width: 16, height: 16 });
+      }
+    }
+
+    tray = new Tray(trayIcon);
     tray.setToolTip('SimplexityAI');
 
     const contextMenu = Menu.buildFromTemplate([
@@ -1265,9 +1403,10 @@ ipcMain.on('close-settings', () => {
   }
 });
 
-ipcMain.on('switch-ai-tool', (event, url) => {
-  if (url.startsWith('http') || url === 'refresh' || url.startsWith('search:')) {
-    switchView(url);
+ipcMain.on('switch-ai-tool', (event, target) => {
+  if (typeof target !== 'string') return;
+  if (isTabId(target) || target.startsWith('http') || target === 'refresh' || target.startsWith('search:')) {
+    switchView(target);
   }
 });
 
@@ -1289,6 +1428,15 @@ ipcMain.on('set-settings', (event, data) => {
     configureAutoStart(data.autoStartEnabled);
   }
 
+  if (data.restoreLastSession !== undefined) {
+    settings.set('restoreLastSession', data.restoreLastSession);
+  }
+
+  if (Array.isArray(data.sidebarShortcuts)) {
+    settings.set('sidebarShortcuts', data.sidebarShortcuts);
+    broadcastSidebarShortcuts();
+  }
+
   if (data.closeToTray !== undefined) {
     settings.set('closeToTray', data.closeToTray);
   }
@@ -1300,13 +1448,28 @@ ipcMain.on('set-settings', (event, data) => {
   reattachShortcuts();
 });
 
+// The sidebar injector in preload_inject.js asks for this on every page load.
+ipcMain.handle('get-sidebar-shortcuts', () => settings.get('sidebarShortcuts', []));
+
+function broadcastSidebarShortcuts() {
+  const ids = settings.get('sidebarShortcuts', []);
+  Object.values(views).forEach((view) => {
+    if (view && view.webContents && !view.webContents.isDestroyed()) {
+      view.webContents.send('sidebar-shortcuts-changed', ids);
+    }
+  });
+}
+
 ipcMain.on('get-settings', (event) => {
   const data = {
     shortcuts,
-    defaultAI: settings.get('defaultAI', 'https://perplexity.ai'),
+    defaultAI: normalizeDefaultAI(settings.get('defaultAI', DEFAULT_TAB_ID)),
     disableHardwareAcceleration: settings.get('disableHardwareAcceleration', false),
     autoStartEnabled: autoStartEnabled,
     closeToTray: settings.get('closeToTray', true),
+    restoreLastSession: settings.get('restoreLastSession', true),
+    sidebarShortcuts: settings.get('sidebarShortcuts', []),
+    defaultShortcuts,
     ctrlEnterToSend: settings.get('ctrlEnterToSend', false)
   };
   event.sender.send('settings', data);
