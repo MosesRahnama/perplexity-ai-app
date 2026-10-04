@@ -229,6 +229,7 @@ window.addEventListener('DOMContentLoaded', () => {
     function nativeState() {
         const editor = nativeEditor();
         const answer = nativeAnswer();
+        const queries = [...(nativeRoot()?.querySelectorAll(NATIVE_QUERIES) || [])];
         return {
             ready: !!editor && nativeSearchMode(),
             busy: nativeBusy(),
@@ -237,6 +238,8 @@ window.addEventListener('DOMContentLoaded', () => {
             answer,
             body: (nativeRoot()?.innerText || '').trim().slice(0, 900000),
             turns: nativeAnswerNodes().length,
+            queryCount: queries.length,
+            lastQuery: (queries.at(-1)?.innerText || '').trim().slice(0, 200000),
             title: document.title,
             url: location.origin + location.pathname,
             model: nativeModelText(),

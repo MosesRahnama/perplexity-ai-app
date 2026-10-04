@@ -23,6 +23,14 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
     }
   }
 
+  function isConversationUrl(value) {
+    try {
+      const parsed = new URL(value);
+      return isPerplexityUrl(value) && /^\/search\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/?$/i.test(parsed.pathname);
+    } catch {
+      return false;
+    }
+  }
   async function request(route, body) {
     const response = await fetch(BASE + route, {
       method: body === undefined ? 'GET' : 'POST',
@@ -34,29 +42,54 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
     return response.json();
   }
 
-  function pageRequest(type, payload = {}, timeoutMs = 15000) {
+  function pageRequest(type, payload = {}, timeoutMs = 15000, options = {}) {
     if (!agentView || agentView.webContents.isDestroyed()) {
       return Promise.reject(new Error('Native Perplexity Agent BrowserView is unavailable'));
     }
     const id = ++requestId;
     return new Promise((resolve, reject) => {
-      const timerId = setTimeout(() => {
+      let settled = false;
+      const webContents = agentView.webContents;
+      const cleanupNavigation = () => {
+        if (!options.allowConversationNavigation) return;
+        webContents.removeListener('did-navigate', onNavigate);
+        webContents.removeListener('did-navigate-in-page', onNavigate);
+      };
+      const finishResolve = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timerId);
+        cleanupNavigation();
         pendingPage.delete(id);
+        resolve(value);
+      };
+      const finishReject = (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timerId);
+        cleanupNavigation();
+        pendingPage.delete(id);
+        reject(error);
+      };
+      const onNavigate = (_event, url) => {
+        if (!isConversationUrl(url)) return;
+        finishResolve({navigationAccepted: true, url});
+      };
+      const timerId = setTimeout(() => {
         const error = new Error('Perplexity page did not answer ' + type);
         error.uncertain = type === 'send';
-        reject(error);
+        finishReject(error);
       }, timeoutMs);
-      pendingPage.set(id, {
-        resolve: (value) => { clearTimeout(timerId); resolve(value); },
-        reject: (error) => { clearTimeout(timerId); reject(error); },
-      });
+      pendingPage.set(id, {resolve: finishResolve, reject: finishReject});
+      if (options.allowConversationNavigation) {
+        webContents.on('did-navigate', onNavigate);
+        webContents.on('did-navigate-in-page', onNavigate);
+      }
       try {
-        agentView.webContents.send('simplexity-native-dispatch-command', {requestId: id, type, payload});
+        webContents.send('simplexity-native-dispatch-command', {requestId: id, type, payload});
       } catch (error) {
-        clearTimeout(timerId);
-        pendingPage.delete(id);
         error.uncertain = type === 'send';
-        reject(error);
+        finishReject(error);
       }
     });
   }
@@ -225,6 +258,7 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
     if (!message) return;
 
     const baselineAnswer = String(page.answer || '');
+    const baselineQueryCount = Number(page.queryCount || 0);
     conversation.pending = {
       id: Number(message.id),
       baselineAnswer,
@@ -239,10 +273,17 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
     } catch (error) {
       conversation.pending.failureDetail = String(error.message).slice(0, 300);
       if (error.uncertain) {
-        conversation.pending.phase = 'send-uncertain';
-        return;
+        try {
+          await verifySubmittedQuery(message.body, {baselineQueryCount, timeoutMs: 20000});
+          conversation.pending.phase = 'sent-awaiting-ack';
+        } catch (verifyError) {
+          conversation.pending.phase = 'send-uncertain';
+          conversation.pending.failureDetail = String(verifyError.message).slice(0, 300);
+          return;
+        }
+      } else {
+        conversation.pending.phase = 'send-failed';
       }
-      conversation.pending.phase = 'send-failed';
     }
     await reconcilePendingDelivery();
   }
@@ -259,6 +300,29 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
     await maybeSendFollowup(page);
   }
 
+  async function verifySubmittedQuery(text, options = {}) {
+    const tail = String(text || '').slice(-160);
+    const baselineQueryCount = Number(options.baselineQueryCount || 0);
+    const requireConversationUrl = !!options.requireConversationUrl;
+    const timeoutMs = Number(options.timeoutMs || 20000);
+    const deadline = Date.now() + timeoutMs;
+    let last = null;
+    while (Date.now() < deadline) {
+      try {
+        last = await pageRequest('state', {}, 5000);
+        const urlOk = !requireConversationUrl || isConversationUrl(last.url);
+        if (urlOk && Number(last.queryCount || 0) > baselineQueryCount &&
+            String(last.lastQuery || '').includes(tail) && !String(last.draft || '').trim()) {
+          return last;
+        }
+      } catch {
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    const error = new Error('Perplexity send could not be verified from the rendered user query; no automatic duplicate was sent');
+    error.uncertain = true;
+    throw error;
+  }
   async function openConversation(command) {
     if (conversation) return {ok: false, detail: 'The native Perplexity receiver already owns a conversation'};
     const model = String(command.model || 'glm-5.3').toLowerCase();
@@ -283,15 +347,23 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
     };
     let sent;
     try {
-      sent = await pageRequest('send', {text: String(command.prompt || '')}, 35000);
+      sent = await pageRequest('send', {text: String(command.prompt || '')}, 35000, {allowConversationNavigation: true});
+      if (sent.navigationAccepted) {
+        sent = await verifySubmittedQuery(command.prompt, {baselineQueryCount: 0, requireConversationUrl: true});
+      }
     } catch (error) {
       const detail = String(error.message).slice(0, 300);
       if (error.uncertain) {
-        conversation.openingUncertain = true;
+        try {
+          sent = await verifySubmittedQuery(command.prompt, {baselineQueryCount: 0, requireConversationUrl: true});
+        } catch (verifyError) {
+          conversation.openingUncertain = true;
+          return {ok: false, conversation_id: id, detail: String(verifyError.message).slice(0, 300)};
+        }
+      } else {
+        conversation = null;
         return {ok: false, conversation_id: id, detail};
       }
-      conversation = null;
-      return {ok: false, conversation_id: id, detail};
     }
     try {
       await publish(sent);
