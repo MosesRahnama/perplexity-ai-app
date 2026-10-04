@@ -150,6 +150,142 @@ window.addEventListener('DOMContentLoaded', () => {
         syncSidebarLinks();
     }).catch(() => {});
 
+    if (isMain) {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const visible = (el) => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+        const label = (el) => (el?.getAttribute('aria-label') || el?.getAttribute('title') || el?.innerText || '').replace(/\s+/g, ' ').trim();
+        const controls = (root = document) => [...root.querySelectorAll('button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="switch"]')].filter(visible);
+        const menus = () => [...document.querySelectorAll('[role="menu"], [data-radix-menu-content]')].filter(visible);
+        const modelKey = (value) => String(value).toLowerCase().replace(/\b(?:thinking|max)\b/g, '').replace(/[^a-z0-9]/g, '');
+        const checked = (el) => {
+            if (!el) return null;
+            const value = String(el.getAttribute('aria-checked') || el.getAttribute('data-state') || '').toLowerCase();
+            return ['true', 'checked', 'on', 'selected'].includes(value) ? true : ['false', 'unchecked', 'off'].includes(value) ? false : null;
+        };
+        const editor = () => [...document.querySelectorAll('textarea, [contenteditable="true"][role="textbox"], .ProseMirror[contenteditable="true"], [contenteditable="true"][data-placeholder]')]
+            .find((el) => visible(el) && !el.disabled && !/search (?:sessions|connectors)/i.test(el.getAttribute('placeholder') || '')) || null;
+        const modelControl = () => {
+            const input = editor();
+            const area = input?.closest('form') || input?.parentElement?.parentElement?.parentElement;
+            return controls(area || document).find((el) =>
+                /^Model$/i.test(label(el)) || /\b(?:GLM|GPT|Gemini|Claude|Grok|Kimi|Nemotron|Best)(?=\d|[\s-]|$)/i.test(label(el))) || null;
+        };
+        const closeMenus = () => document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', code: 'Escape', bubbles: true}));
+        const clickMenu = (el) => {
+            const event = {bubbles: true, button: 0, pointerType: 'mouse', isPrimary: true};
+            el.dispatchEvent(new PointerEvent('pointerdown', event));
+            el.dispatchEvent(new PointerEvent('pointerup', event));
+            el.click();
+        };
+        const waitFor = async (read, ms = 4000) => {
+            const until = Date.now() + ms;
+            while (Date.now() < until) {
+                const value = read();
+                if (value) return value;
+                await sleep(100);
+            }
+            return null;
+        };
+
+        const defaultPolicy = {model: 'glm-5.3', thinking: true};
+        let preferred = {...defaultPolicy};
+        let preferenceReady = false;
+        let enforcing = false;
+        let userMenuUntil = 0;
+        let debounce = null;
+
+        function scheduleModelPolicy() {
+            clearTimeout(debounce);
+            debounce = setTimeout(enforceModelPolicy, 120);
+        }
+
+        async function enforceModelPolicy() {
+            if (enforcing || !preferenceReady || Date.now() < userMenuUntil) return;
+            const wanted = preferred.model === 'gemini-3.8-flash' ? 'gemini-3.8-flash' : 'glm-5.3';
+            const button = modelControl();
+            if (!button) return;
+            const current = label(button);
+            const explicitCurrent = !/^Model$/i.test(current);
+            if (explicitCurrent && modelKey(current) === modelKey(wanted) &&
+                (wanted !== 'glm-5.3' || /\bThinking\b/i.test(current))) return;
+
+            enforcing = true;
+            try {
+                clickMenu(button);
+                if (!explicitCurrent) {
+                    const selected = await waitFor(() => menus().flatMap((menu) => controls(menu)).find((el) => checked(el) === true), 1500);
+                    const selectedText = label(selected);
+                    if (selected && modelKey(selectedText) === modelKey(wanted) &&
+                        (wanted !== 'glm-5.3' || /\bThinking\b/i.test(selectedText))) {
+                        closeMenus();
+                        return;
+                    }
+                }
+                const item = await waitFor(() => menus().flatMap((menu) => controls(menu))
+                    .find((el) => modelKey(label(el)) === modelKey(wanted)));
+                if (!item || item.disabled || item.getAttribute('aria-disabled') === 'true' || /\bMax\b/.test(label(item))) {
+                    closeMenus();
+                    return;
+                }
+                if (wanted === 'glm-5.3') {
+                    item.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
+                    item.dispatchEvent(new PointerEvent('pointermove', {bubbles: true, pointerType: 'mouse'}));
+                    const toggle = await waitFor(() => menus().flatMap((menu) => controls(menu))
+                        .find((el) => label(el) === 'Thinking' || el.getAttribute('role') === 'switch'), 1500);
+                    if (toggle && checked(toggle) !== true) toggle.click();
+                }
+                item.click();
+                closeMenus();
+            } finally {
+                enforcing = false;
+            }
+        }
+
+        ipcRenderer.invoke('get-perplexity-model-policy').then((value) => {
+            preferred = value?.model === 'gemini-3.8-flash'
+                ? {model: 'gemini-3.8-flash', thinking: false}
+                : {...defaultPolicy};
+            preferenceReady = true;
+            scheduleModelPolicy();
+        }).catch(() => { preferenceReady = true; });
+
+        ipcRenderer.on('perplexity-model-policy-changed', (_event, value) => {
+            preferred = value?.model === 'gemini-3.8-flash'
+                ? {model: 'gemini-3.8-flash', thinking: false}
+                : {...defaultPolicy};
+            preferenceReady = true;
+            scheduleModelPolicy();
+        });
+
+        document.addEventListener('pointerdown', (event) => {
+            if (!event.isTrusted) return;
+            const control = event.target?.closest?.('button, [role="button"]');
+            if (!control || control.closest('[role="menu"], [data-radix-menu-content]')) return;
+            const value = label(control);
+            if (/^Model$/i.test(value) || /\b(?:GLM|GPT|Gemini|Claude|Grok|Kimi|Nemotron|Best)(?=\d|[\s-]|$)/i.test(value)) {
+                userMenuUntil = Date.now() + 5000;
+            }
+        }, true);
+
+        document.addEventListener('click', (event) => {
+            if (!event.isTrusted) return;
+            const control = event.target?.closest?.('button, [role="button"], [role="menuitem"], [role="menuitemradio"]');
+            if (!control || !control.closest('[role="menu"], [data-radix-menu-content]')) return;
+            const value = label(control);
+            let next = null;
+            if (modelKey(value) === modelKey('glm-5.3')) next = {model: 'glm-5.3', thinking: true};
+            else if (modelKey(value) === modelKey('gemini-3.8-flash')) next = {model: 'gemini-3.8-flash', thinking: false};
+            if (!next) return;
+            preferred = next;
+            userMenuUntil = 0;
+            ipcRenderer.invoke('set-perplexity-model-policy', next).catch(() => {});
+        }, true);
+
+        const modelObserver = new MutationObserver(scheduleModelPolicy);
+        modelObserver.observe(document.body, {childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label', 'aria-checked', 'data-state']});
+        setInterval(enforceModelPolicy, 1000);
+    }
+
     // Applying changes without a reload keeps Settings feeling immediate.
     ipcRenderer.on('sidebar-shortcuts-changed', (_event, ids) => {
         enabledIds = Array.isArray(ids) ? ids : [];
