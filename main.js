@@ -4,6 +4,7 @@ const fs = require('fs');
 const Store = require('electron-store');
 const marked = require('marked');
 const windowStateKeeper = require('electron-window-state');
+const { createNativeDispatch } = require('./native-dispatch');
 
 const DEV_PROFILE_FLAG = '--dev-profile';
 const useDevProfile = process.argv.includes(DEV_PROFILE_FLAG);
@@ -97,6 +98,8 @@ let searchService;
 let prefixSearchWindow = null; 
 let launchedHidden = process.argv.includes('--hidden') || process.argv.includes('--start-minimized');
 let layoutCheckInterval;
+const useNativeDispatch = !process.argv.includes('--no-native-dispatch');
+let nativeDispatch = null;
 
 let autoStartEnabled = settings.get('autoStartEnabled', false);
 
@@ -1458,13 +1461,31 @@ ipcMain.on('set-settings', (event, data) => {
 // The sidebar injector in preload_inject.js asks for this on every page load.
 ipcMain.handle('get-sidebar-shortcuts', () => settings.get('sidebarShortcuts', []));
 
-const DEFAULT_PERPLEXITY_MODEL_POLICY = { model: 'glm-5.3', thinking: true };
+// Perplexity app policy uses Electron's native text insertion so both visible
+// BrowserViews and the hidden agent view can enter a one-word confirmation
+// without depending on Perplexity's editor implementation.
+ipcMain.handle('perplexity-policy-insert-text', (event, text) => {
+  try {
+    const url = new URL(event.sender.getURL());
+    if (url.protocol !== 'https:' || !['perplexity.ai', 'www.perplexity.ai'].includes(url.hostname)) {
+      throw new Error('Perplexity text insertion is only available on perplexity.ai');
+    }
+    const value = String(text || '').slice(0, 32);
+    if (!value) return false;
+    event.sender.insertText(value);
+    return true;
+  } catch (error) {
+    console.warn('Perplexity policy insert:', error.message);
+    return false;
+  }
+});
+
+const DEFAULT_PERPLEXITY_MODEL_POLICY = {model: 'glm-5.3', thinking: true};
 function normalizePerplexityModelPolicy(value) {
   const model = String(value?.model || '').toLowerCase();
-  if (model === 'gemini-3.8-flash') return { model: 'gemini-3.8-flash', thinking: false };
-  return { ...DEFAULT_PERPLEXITY_MODEL_POLICY };
+  if (model === 'gemini-3.8-flash') return {model: 'gemini-3.8-flash', thinking: false};
+  return {...DEFAULT_PERPLEXITY_MODEL_POLICY};
 }
-
 ipcMain.handle('get-perplexity-model-policy', (event) => {
   try {
     const url = new URL(event.sender.getURL());
@@ -1474,7 +1495,6 @@ ipcMain.handle('get-perplexity-model-policy', (event) => {
     return null;
   }
 });
-
 ipcMain.handle('set-perplexity-model-policy', (event, value) => {
   try {
     const url = new URL(event.sender.getURL());
@@ -1734,6 +1754,10 @@ app.whenReady().then(() => {
     createTray();
     
     startLayoutChecks();
+    if (useNativeDispatch) {
+      nativeDispatch = createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path, settings, appDir: __dirname});
+      nativeDispatch.start();
+    }
     
     if (searchInfo) {
       setTimeout(() => {
@@ -1753,5 +1777,6 @@ app.whenReady().then(() => {
 });
 
 app.on('will-quit', () => {
+  if (nativeDispatch) nativeDispatch.stop();
   globalShortcut.unregisterAll(); // Unregister all shortcuts
 });
