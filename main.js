@@ -4,6 +4,7 @@ const fs = require('fs');
 const Store = require('electron-store');
 const marked = require('marked');
 const windowStateKeeper = require('electron-window-state');
+const { createNativeDispatch } = require('./native-dispatch');
 
 const DEV_PROFILE_FLAG = '--dev-profile';
 const useDevProfile = process.argv.includes(DEV_PROFILE_FLAG);
@@ -97,6 +98,8 @@ let searchService;
 let prefixSearchWindow = null; 
 let launchedHidden = process.argv.includes('--hidden') || process.argv.includes('--start-minimized');
 let layoutCheckInterval;
+const useNativeDispatch = process.argv.includes('--native-dispatch');
+let nativeDispatch = null;
 
 let autoStartEnabled = settings.get('autoStartEnabled', false);
 
@@ -1700,6 +1703,10 @@ app.whenReady().then(() => {
     createTray();
     
     startLayoutChecks();
+    if (useNativeDispatch) {
+      nativeDispatch = createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path, appDir: __dirname});
+      nativeDispatch.start();
+    }
     
     if (searchInfo) {
       setTimeout(() => {
@@ -1719,5 +1726,6 @@ app.whenReady().then(() => {
 });
 
 app.on('will-quit', () => {
+  if (nativeDispatch) nativeDispatch.stop();
   globalShortcut.unregisterAll(); // Unregister all shortcuts
 });

@@ -150,6 +150,157 @@ window.addEventListener('DOMContentLoaded', () => {
         syncSidebarLinks();
     }).catch(() => {});
 
+    if (process.argv.includes('--simplexity-native-agent')) {
+    // Native Dispatch bridge. The page can only answer narrow requests from the
+    // Electron main process. It cannot reach the controller directly.
+    const NATIVE_ANSWERS = '[data-message-author-role="assistant"], [data-role="assistant"], [data-testid="assistant-message"], [data-testid="answer"], .prose';
+    const NATIVE_QUERIES = '[class~="group/user-bubble"]';
+    const nativeSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const nativeVisible = (el) => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+    const nativeLabel = (el) => (el?.getAttribute('aria-label') || el?.getAttribute('title') || el?.innerText || '').replace(/\s+/g, ' ').trim();
+
+    function nativeSafePage() {
+        return !/\/(?:settings|account|connectors|library|privacy|login|signin|auth|automations|skills|workflows)(?:\/|$)/i.test(location.pathname);
+    }
+
+    function nativeEditor() {
+        if (!nativeSafePage()) return null;
+        return [...document.querySelectorAll('textarea, [contenteditable="true"][role="textbox"], .ProseMirror[contenteditable="true"], [contenteditable="true"][data-placeholder]')]
+            .find((el) => nativeVisible(el) && !el.disabled && !/search (?:sessions|connectors)/i.test(el.getAttribute('placeholder') || '')) || null;
+    }
+
+    function nativeDraft(el) {
+        if (!el) return '';
+        if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') return (el.value || '').trim();
+        const clone = el.cloneNode(true);
+        clone.querySelectorAll('[contenteditable="false"]').forEach((node) => node.remove());
+        return (clone.textContent || '').trim();
+    }
+
+    function nativeRoot() {
+        const main = [...document.querySelectorAll('main, [role="main"], [role="log"], [data-testid="thread-content"]')].find(nativeVisible);
+        if (main) return main;
+        let node = nativeEditor()?.parentElement;
+        for (let i = 0; node && i < 7; i++, node = node.parentElement) {
+            if (node.querySelector(NATIVE_ANSWERS) && !node.querySelector('nav, aside, [role="navigation"]')) return node;
+        }
+        return null;
+    }
+
+    function nativeAnswerNodes() {
+        const area = nativeRoot();
+        if (!area) return [];
+        const found = [...area.querySelectorAll(NATIVE_ANSWERS)].filter((el) => nativeVisible(el) &&
+            !el.closest('[data-message-author-role="user"], [data-role="user"]'));
+        return found.filter((el) => !found.some((parent) => parent !== el && parent.contains(el)));
+    }
+
+    function nativeAnswer() { return (nativeAnswerNodes().at(-1)?.innerText || '').trim(); }
+
+    function nativeBusy() {
+        const stop = [...document.querySelectorAll('button')].find((el) => nativeVisible(el) &&
+            /^stop(?:\s+(?:generating|response|answer|task|work|research))?(?:\s*\(Esc\))?$/i.test(nativeLabel(el)));
+        return !!stop || [...(nativeRoot()?.querySelectorAll('[aria-busy="true"]') || [])].some(nativeVisible);
+    }
+
+    function nativeNeedsApproval(text) {
+        if ([...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')].some(nativeVisible)) return true;
+        return /confirm_action|(?:I need|I require|waiting for|requires? your|please give|please grant).{0,60}(?:permission|approval|consent)|please confirm|(?:sign[ -]?in|log[ -]?in|authorize).{0,35}(?:to continue|before|access)|(?:click|select|press).{0,30}(?:allow|approve|authorize|confirm)|complete.{0,20}captcha/i.test(text || '');
+    }
+
+    function nativeConnectionError() {
+        const notices = [...(nativeRoot()?.querySelectorAll('[role="alert"], [role="status"], [data-testid*="error"]') || [])]
+            .filter(nativeVisible).map((el) => el.innerText).join('\n');
+        return /connection (?:lost|timed? out)|waiting for (?:a )?connection|reconnecting|thinking failed|something (?:went|has gone) wrong/i.test(notices) && !nativeNeedsApproval(notices);
+    }
+
+    function nativeModelText() {
+        const editor = nativeEditor();
+        const area = editor?.closest('form') || editor?.parentElement?.parentElement?.parentElement;
+        const controls = [...(area || document).querySelectorAll('button, [role="button"]')].filter(nativeVisible);
+        return nativeLabel(controls.find((el) => /\b(?:GLM|GPT|Gemini|Claude|Grok|Kimi|Nemotron|Best)(?=\d|[\s-]|$)/i.test(nativeLabel(el)))) || '';
+    }
+
+    function nativeSearchMode() {
+        return [...document.querySelectorAll('button, [role="button"]')].filter(nativeVisible)
+            .some((el) => /^Search$/i.test(nativeLabel(el)));
+    }
+
+    function nativeState() {
+        const editor = nativeEditor();
+        const answer = nativeAnswer();
+        return {
+            ready: !!editor && nativeSearchMode(),
+            busy: nativeBusy(),
+            needsApproval: nativeNeedsApproval(answer),
+            connectionError: nativeConnectionError(),
+            answer,
+            body: (nativeRoot()?.innerText || '').trim().slice(0, 900000),
+            turns: nativeAnswerNodes().length,
+            title: document.title,
+            url: location.origin + location.pathname,
+            model: nativeModelText(),
+            draft: nativeDraft(editor),
+        };
+    }
+
+    async function nativeSend(text) {
+        const state = nativeState();
+        const editor = nativeEditor();
+        if (!state.ready || !editor) throw new Error('Perplexity Search composer is not ready');
+        if (state.busy || state.needsApproval || state.connectionError) throw new Error('Perplexity is not in a safe send state');
+        if (state.draft) throw new Error('Perplexity composer already contains a draft');
+        if (!/glm\s*-?\s*5\.3/i.test(state.model) || !/thinking/i.test(state.model)) {
+            throw new Error(`Expected GLM 5.3 Thinking before send; found ${state.model || 'no readable model label'}`);
+        }
+
+        const queryCount = nativeRoot()?.querySelectorAll(NATIVE_QUERIES).length || 0;
+        editor.focus();
+        if (editor.tagName === 'TEXTAREA') {
+            Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(editor, text);
+            editor.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: text}));
+        } else {
+            const range = document.createRange();
+            const paragraphs = editor.querySelectorAll('p');
+            range.selectNodeContents(paragraphs.length ? paragraphs[paragraphs.length - 1] : editor);
+            range.collapse(false);
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            if (!document.execCommand('insertText', false, text)) throw new Error('Perplexity editor did not accept the text');
+        }
+
+        await nativeSleep(150);
+        const area = editor.closest('form') || editor.parentElement?.parentElement?.parentElement || editor.parentElement;
+        const button = [...area.querySelectorAll('button')].find((node) => nativeVisible(node) && !node.disabled &&
+            (node.type === 'submit' || /^(?:send|submit|ask)(?: message| prompt| question| perplexity)?$|^start task$/i.test(nativeLabel(node))));
+        if (!button) throw new Error('Send button was not found; the draft was left in place');
+        button.click();
+
+        const until = Date.now() + 30000;
+        while (Date.now() < until) {
+            const queries = [...(nativeRoot()?.querySelectorAll(NATIVE_QUERIES) || [])];
+            const accepted = queries.length > queryCount && (queries.at(-1)?.innerText || '').includes(text.slice(-160));
+            if (!nativeDraft(nativeEditor()) && accepted) return nativeState();
+            await nativeSleep(250);
+        }
+        throw new Error('Send outcome is unknown; no automatic duplicate was sent');
+    }
+
+    ipcRenderer.on('simplexity-native-dispatch-command', async (_event, message) => {
+        const requestId = Number(message?.requestId);
+        try {
+            let result;
+            if (message?.type === 'probe' || message?.type === 'state') result = nativeState();
+            else if (message?.type === 'send') result = await nativeSend(String(message?.payload?.text || ''));
+            else throw new Error('Unknown native Dispatch page command');
+            ipcRenderer.send('simplexity-native-dispatch-result', {requestId, ok: true, result});
+        } catch (error) {
+            ipcRenderer.send('simplexity-native-dispatch-result', {requestId, ok: false, detail: String(error.message).slice(0, 300)});
+        }
+    });
+    }
+
     // Applying changes without a reload keeps Settings feeling immediate.
     ipcRenderer.on('sidebar-shortcuts-changed', (_event, ids) => {
         enabledIds = Array.isArray(ids) ? ids : [];

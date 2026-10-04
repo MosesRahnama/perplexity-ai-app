@@ -14,7 +14,7 @@
     "package-linux": "electron-builder --linux --publish never",
     "postinstall": "electron-builder install-app-deps",
     "package-auto": "node build-auto.js",
-    "check": "node --check main.js && node --check notification-manager.js && node --check search-service.js && node --check build-auto.js && node --check src/js/preload/preload.js && node --check src/js/preload/preload_inject.js && node --check src/js/preload/preload_notification.js && node --check src/js/preload/preload_notification_panel.js && node --check src/js/preload/preload_prefix.js && node --check src/js/preload/preload_update.js && node --check src/js/renderer/notification_panel_renderer.js && node --check src/js/renderer/notification_renderer.js && node --check src/js/renderer/renderer.js && node --check src/js/renderer/update_renderer.js"
+    "check": "node --check main.js && node --check native-dispatch.js && node --check notification-manager.js && node --check search-service.js && node --check build-auto.js && node --check src/js/preload/preload.js && node --check src/js/preload/preload_inject.js && node --check src/js/preload/preload_notification.js && node --check src/js/preload/preload_notification_panel.js && node --check src/js/preload/preload_prefix.js && node --check src/js/preload/preload_update.js && node --check src/js/renderer/notification_panel_renderer.js && node --check src/js/renderer/notification_renderer.js && node --check src/js/renderer/renderer.js && node --check src/js/renderer/update_renderer.js"
   },
   "repository": "https://github.com/MosesRahnama/perplexity-ai-app",
   "author": "inulute <inulute@users.noreply.github.com>",
