@@ -404,6 +404,11 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
       page = await pageRequest('state', {}, 5000);
     }
     await finishOpening(page);
+    if (conversation.pending && ['submit-started', 'send-uncertain', 'reply-started'].includes(conversation.pending.phase)) {
+      if (!await recoverPendingDelivery()) return;
+      if (!conversation) return;
+      page = await pageRequest('state', {}, 5000);
+    }
     if (!await reconcilePendingDelivery()) return;
     await finishFollowup(page);
     await maybeSendFollowup(page);
@@ -707,6 +712,30 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
     }
   }
 
+  async function claimRecoveryClose() {
+    if (!conversation) return false;
+    const listing = await request('/api/chat-commands?limit=50');
+    const queued = (Array.isArray(listing.commands) ? listing.commands : [])
+      .filter((command) => command.status === 'queued' && command.surface === SURFACE)
+      .sort((a, b) => Number(a.id) - Number(b.id));
+    const next = queued[0];
+    if (!next || next.kind !== 'close') return false;
+    const claimed = await request('/api/chat-commands/next', {surface: SURFACE});
+    const command = claimed.command;
+    if (!command) return false;
+    if (Number(command.id) !== Number(next.id) || command.kind !== 'close') {
+      await request('/api/chat-commands/' + command.id + '/result', {
+        ok: false,
+        conversation_id: String(command.conversation_id || ''),
+        detail: 'Recovery queue changed before close claim; no Perplexity prompt was sent',
+      });
+      return false;
+    }
+    const result = await closeConversation(command);
+    await reportCommandResult(command, result);
+    return !!result.ok;
+  }
+
   async function controllerReady() {
     try {
       const value = await request('/api/chat-open-prompt?surface=perplexity&lane=sup-perplexity');
@@ -767,7 +796,16 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
       if (recoveryReady || !timer) return;
       try {
         const resolved = await recoverState();
-        if (!resolved) return;
+        if (!resolved) {
+          console.warn('Native Perplexity Dispatch recovery remains frozen; no prompt replay or new work claim will occur');
+          if (await claimRecoveryClose()) {
+            recoveryReady = true;
+            tick();
+            return;
+          }
+          setTimeout(attemptRecovery, 2000);
+          return;
+        }
         recoveryReady = true;
         tick();
       } catch (error) {

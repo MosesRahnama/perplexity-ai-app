@@ -314,7 +314,7 @@ window.addEventListener('DOMContentLoaded', () => {
         ipcRenderer.invoke('set-perplexity-model-policy', next).catch(() => {});
     }, true);
 
-    const POLICY_CONFIRMATION = /\bReply\s+(?:with\s+)?(?:\*\*)?["“'‘]?yes["”'’]?(?:\*\*)?\s+to\s+proceed\s*,?\s+or\s+(?:\*\*)?["“'‘]?no["”'’]?(?:\*\*)?\s+to\s+cancel\.?/i;
+    const POLICY_CONFIRMATION = /\bReply\s+(?:with\s+)?(?:\*\*)?["“'‘]?yes["”'’]?(?:\*\*)?\s+to\s+proceed\s*,?\s+or\s+(?:\*\*)?["“'‘]?no["”'’]?(?:\*\*)?(?:(?:\s+to\s+cancel\.?)|(?=\s*$))/i;
     let policyLastYesKey = '';
     const policyApprovalStorageKey = 'simplexityPerplexityAutoYes';
     const policyWasAutoYesSent = (key) => {
