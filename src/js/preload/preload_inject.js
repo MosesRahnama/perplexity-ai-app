@@ -213,14 +213,20 @@ window.addEventListener('DOMContentLoaded', () => {
         if (!area) return {text: '', turn: 0};
         const found = [...area.querySelectorAll(POLICY_ANSWERS)].filter((el) => policyVisible(el) && !el.closest('[data-message-author-role="user"], [data-role="user"]'));
         const leaves = found.filter((el) => !found.some((parent) => parent !== el && parent.contains(el)));
-        return {text: (leaves.at(-1)?.innerText || '').trim(), turn: leaves.length};
+        const latest = leaves.at(-1) || null;
+        const turn = latest?.getAttribute('data-message-id') || latest?.id || String(leaves.length);
+        return {text: (latest?.innerText || '').trim(), turn};
     };
     const policyBusy = () => policyControls().some((el) => /^stop(?:\s+(?:generating|response|answer|task|work|research))?(?:\s*\(Esc\))?$/i.test(policyText(el))) ||
         [...(policyRoot()?.querySelectorAll('[aria-busy="true"]') || [])].some(policyVisible);
     const policyApprovalDialog = () => [...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')].some(policyVisible);
     const policyProtectedAction = (text) => {
         const body = String(text || '').replace(/\s+/g, ' ');
-        return /\b(?:send|sending|deliver|delivering)\b.{0,60}\be-?mail\b|\b(?:send_email|send_mail|gmail_send|outlook_send|dispatch_new)\b|["']agent["']\s*:\s*["']droid["']|\b(?:use|using|call|calling|dispatch|dispatching|pay|buy)\b.{0,60}\bOpenRouter\b|\bOpenRouter\b.{0,60}\bAPI (?:call|request)\b/i.test(body);
+        // Auto-confirm must never stand in for the operator on protected external actions.
+        // Conservative matching is intentional: a harmless false block is safer than approving one.
+        return /\b(?:e-?mail|gmail|outlook|openrouter|droid)\b/i.test(body) ||
+            /\b(?:send_email|send_mail|gmail_send|outlook_send|dispatch_new)\b/i.test(body) ||
+            /["']agent["']\s*:\s*["']droid["']/i.test(body);
     };
     const policyModelControl = () => {
         const editor = policyEditor();
@@ -308,14 +314,33 @@ window.addEventListener('DOMContentLoaded', () => {
         ipcRenderer.invoke('set-perplexity-model-policy', next).catch(() => {});
     }, true);
 
-    const POLICY_CONFIRMATION = /\bReply\s+(?:with\s+)?(?:\*\*)?["“'‘]?yes["”'’]?(?:\*\*)?\s+to\s+proceed\s*,?\s+or\s+(?:\*\*)?["“'‘]?no["”'’]?(?:\*\*)?(?:(?:\s+to\s+cancel\.?)|(?=\s*$))/i;
+    const POLICY_CONFIRMATION = /\bReply\s+(?:with\s+)?(?:\*\*)?["“'‘]?yes["”'’]?(?:\*\*)?\s+to\s+proceed\s*,?\s+or\s+(?:\*\*)?["“'‘]?no["”'’]?(?:\*\*)?\s+to\s+cancel\.?/i;
     let policyLastYesKey = '';
+    const policyApprovalStorageKey = 'simplexityPerplexityAutoYes';
+    const policyWasAutoYesSent = (key) => {
+        if (policyLastYesKey === key) return true;
+        try {
+            const saved = JSON.parse(sessionStorage.getItem(policyApprovalStorageKey) || '{}') || {};
+            return saved[key] === true;
+        } catch {
+            return false;
+        }
+    };
+    const policyRememberAutoYes = (key) => {
+        policyLastYesKey = key;
+        try {
+            const saved = JSON.parse(sessionStorage.getItem(policyApprovalStorageKey) || '{}') || {};
+            saved[key] = true;
+            sessionStorage.setItem(policyApprovalStorageKey, JSON.stringify(Object.fromEntries(Object.entries(saved).slice(-50))));
+        } catch {
+        }
+    };
     async function policyAutoYes() {
         const answerState = policyAnswerState();
         const answer = answerState.text;
         if (!POLICY_CONFIRMATION.test(answer) || policyBusy() || policyApprovalDialog() || policyProtectedAction(answer)) return;
-        const key = `${location.pathname}|${answerState.turn}|${answer}`;
-        if (policyLastYesKey === key) return;
+        const key = `${location.pathname}|${answerState.turn}`;
+        if (policyWasAutoYesSent(key)) return;
         const editor = policyEditor();
         if (!editor || policyDraft(editor)) return;
         editor.focus();
@@ -332,7 +357,7 @@ window.addEventListener('DOMContentLoaded', () => {
             if (button) break;
         }
         if (!button) return;
-        policyLastYesKey = key;
+        policyRememberAutoYes(key);
         button.click();
     }
 
