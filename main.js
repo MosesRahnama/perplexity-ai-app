@@ -1465,8 +1465,15 @@ function normalizePerplexityModelPolicy(value) {
   return { ...DEFAULT_PERPLEXITY_MODEL_POLICY };
 }
 
-ipcMain.handle('get-perplexity-model-policy', () =>
-  normalizePerplexityModelPolicy(settings.get('perplexityModelPolicy', DEFAULT_PERPLEXITY_MODEL_POLICY)));
+ipcMain.handle('get-perplexity-model-policy', (event) => {
+  try {
+    const url = new URL(event.sender.getURL());
+    if (url.protocol !== 'https:' || !['perplexity.ai', 'www.perplexity.ai'].includes(url.hostname)) return null;
+    return normalizePerplexityModelPolicy(settings.get('perplexityModelPolicy', DEFAULT_PERPLEXITY_MODEL_POLICY));
+  } catch {
+    return null;
+  }
+});
 
 ipcMain.handle('set-perplexity-model-policy', (event, value) => {
   try {
