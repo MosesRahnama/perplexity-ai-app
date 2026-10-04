@@ -308,7 +308,7 @@ window.addEventListener('DOMContentLoaded', () => {
         ipcRenderer.invoke('set-perplexity-model-policy', next).catch(() => {});
     }, true);
 
-    const POLICY_CONFIRMATION = /\bReply\s+(?:with\s+)?(?:\*\*)?["“'‘]?yes["”'’]?(?:\*\*)?\s+to\s+proceed\s*,?\s+or\s+(?:\*\*)?["“'‘]?no["”'’]?(?:\*\*)?\s+to\s+cancel\.?/i;
+    const POLICY_CONFIRMATION = /\bReply\s+(?:with\s+)?(?:\*\*)?["“'‘]?yes["”'’]?(?:\*\*)?\s+to\s+proceed\s*,?\s+or\s+(?:\*\*)?["“'‘]?no["”'’]?(?:\*\*)?(?:(?:\s+to\s+cancel\.?)|(?=\s*$))/i;
     let policyLastYesKey = '';
     async function policyAutoYes() {
         const answerState = policyAnswerState();
@@ -367,6 +367,7 @@ window.addEventListener('DOMContentLoaded', () => {
     const nativeSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const nativeVisible = (el) => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
     const nativeLabel = (el) => (el?.getAttribute('aria-label') || el?.getAttribute('title') || el?.innerText || '').replace(/\s+/g, ' ').trim();
+    const nativeProofText = (value) => String(value || '').replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/[*_`~]/g, '').replace(/\s+/g, ' ').trim();
 
     function nativeSafePage() {
         return !/\/(?:settings|account|connectors|library|privacy|login|signin|auth|automations|skills|workflows)(?:\/|$)/i.test(location.pathname);
@@ -440,6 +441,7 @@ window.addEventListener('DOMContentLoaded', () => {
         const editor = nativeEditor();
         const answer = nativeAnswer();
         const queries = [...(nativeRoot()?.querySelectorAll(NATIVE_QUERIES) || [])];
+        const queryStartIndex = Math.max(0, queries.length - 20);
         return {
             ready: !!editor && nativeSearchMode(),
             busy: nativeBusy(),
@@ -450,6 +452,8 @@ window.addEventListener('DOMContentLoaded', () => {
             turns: nativeAnswerNodes().length,
             queryCount: queries.length,
             lastQuery: (queries.at(-1)?.innerText || '').trim().slice(0, 200000),
+            queryStartIndex,
+            recentQueries: queries.slice(queryStartIndex).map((node) => (node.innerText || '').trim().slice(0, 200000)),
             title: document.title,
             url: location.origin + location.pathname,
             model: nativeModelText(),
@@ -492,7 +496,7 @@ window.addEventListener('DOMContentLoaded', () => {
         while (Date.now() < until) {
             const queries = [...(nativeRoot()?.querySelectorAll(NATIVE_QUERIES) || [])];
             const accepted = queries.length > Number(baselineQueryCount || 0) &&
-                (queries.at(-1)?.innerText || '').includes(text.slice(-160));
+                nativeProofText(queries.at(-1)?.innerText || '').includes(nativeProofText(text).slice(-160));
             if (!nativeDraft(nativeEditor()) && accepted) return nativeState();
             await nativeSleep(250);
         }

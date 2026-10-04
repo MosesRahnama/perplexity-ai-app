@@ -3,12 +3,15 @@
 const BASE = 'http://127.0.0.1:8792';
 const HOME = 'https://www.perplexity.ai/';
 const SURFACE = 'perplexity';
+const RECOVERY_KEY = 'nativeDispatchRecovery';
+const RECOVERY_VERSION = 1;
 
-function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path, appDir}) {
+function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path, settings, appDir}) {
   let agentView = null;
   let agentHostWindow = null;
   let timer = null;
   let running = false;
+  let recoveryReady = false;
   let requestId = 0;
   const pendingPage = new Map();
   let conversation = null;
@@ -31,6 +34,67 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
       return false;
     }
   }
+
+  function recoverySnapshot() {
+    if (!conversation) return null;
+    const liveUrl = agentView && !agentView.webContents.isDestroyed() ? agentView.webContents.getURL() : '';
+    return {
+      version: RECOVERY_VERSION,
+      conversation: {
+        id: String(conversation.id || ''),
+        lane: String(conversation.lane || ''),
+        model: String(conversation.model || 'glm-5.3'),
+        reasoning: String(conversation.reasoning || 'thinking'),
+        pageUrl: isPerplexityUrl(liveUrl) ? liveUrl : String(conversation.pageUrl || ''),
+        openingBaseline: String(conversation.openingBaseline || ''),
+        openingLastAnswer: String(conversation.openingLastAnswer || ''),
+        openingChangedAt: Number(conversation.openingChangedAt || Date.now()),
+        openingDone: !!conversation.openingDone,
+        openingUncertain: !!conversation.openingUncertain,
+        openingCommand: conversation.openingCommand ? {...conversation.openingCommand} : null,
+        pending: conversation.pending ? {...conversation.pending} : null,
+      },
+    };
+  }
+
+  function saveRecovery() {
+    if (!settings) return;
+    const record = recoverySnapshot();
+    if (record) settings.set(RECOVERY_KEY, record);
+    else settings.delete(RECOVERY_KEY);
+  }
+
+  function clearRecovery() {
+    if (settings) settings.delete(RECOVERY_KEY);
+  }
+
+  function loadRecovery() {
+    if (!settings) return null;
+    const record = settings.get(RECOVERY_KEY, null);
+    if (!record || Number(record.version) !== RECOVERY_VERSION || !record.conversation) return null;
+    const value = record.conversation;
+    if (!value.id || !value.lane) return null;
+    return value;
+  }
+
+  function hydrateRecovery(value) {
+    conversation = {
+      id: String(value.id),
+      lane: String(value.lane),
+      model: String(value.model || 'glm-5.3'),
+      reasoning: String(value.reasoning || 'thinking'),
+      pageUrl: isPerplexityUrl(value.pageUrl) ? String(value.pageUrl) : HOME,
+      pending: value.pending ? {...value.pending} : null,
+      lastTranscript: '',
+      openingBaseline: String(value.openingBaseline || ''),
+      openingLastAnswer: String(value.openingLastAnswer || ''),
+      openingChangedAt: Number(value.openingChangedAt || Date.now()),
+      openingDone: !!value.openingDone,
+      openingUncertain: !!value.openingUncertain,
+      openingCommand: value.openingCommand ? {...value.openingCommand} : null,
+    };
+  }
+
   async function request(route, body) {
     const response = await fetch(BASE + route, {
       method: body === undefined ? 'GET' : 'POST',
@@ -181,6 +245,10 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
   async function publish(page) {
     if (!conversation) return;
     const url = String(page.url || agentView.webContents.getURL() || '').slice(0, 300);
+    if (url && url !== conversation.pageUrl) {
+      conversation.pageUrl = url;
+      saveRecovery();
+    }
     await request('/api/chats', {
       conversation_id: conversation.id,
       lane: conversation.lane,
@@ -219,6 +287,7 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
     if (!answer || answer === conversation.openingBaseline || page.busy || page.needsApproval ||
         page.connectionError || Date.now() - conversation.openingChangedAt < 8000) return;
     conversation.openingDone = true;
+    saveRecovery();
   }
 
   async function reconcilePendingDelivery() {
@@ -232,6 +301,7 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
           detail: pending.failureDetail || 'Perplexity send failed',
         });
         conversation.pending = null;
+        saveRecovery();
         return true;
       } catch {
         return false;
@@ -241,6 +311,7 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
       try {
         await request('/api/chat-messages/' + pending.id + '/delivered', {ok: true, detail: ''});
         pending.phase = 'delivered';
+        saveRecovery();
       } catch {
         return false;
       }
@@ -250,16 +321,28 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
 
   async function finishFollowup(page) {
     const pending = conversation && conversation.pending;
-    if (!pending || pending.phase !== 'delivered') return;
+    if (!pending) return;
+    if (pending.phase === 'reply-started') {
+      await request('/api/chat-messages/' + pending.id + '/reply', {reply: String(pending.replyText || '').slice(0, 200000)});
+      conversation.pending = null;
+      saveRecovery();
+      return;
+    }
+    if (pending.phase !== 'delivered') return;
     const answer = String(page.answer || '');
     if (answer !== pending.lastAnswer) {
       pending.lastAnswer = answer;
       pending.changedAt = Date.now();
+      saveRecovery();
     }
     if (!answer || answer === pending.baselineAnswer || page.busy || page.needsApproval ||
         page.connectionError || Date.now() - pending.changedAt < 8000) return;
-    await request('/api/chat-messages/' + pending.id + '/reply', {reply: answer.slice(0, 200000)});
+    pending.replyText = answer.slice(0, 200000);
+    pending.phase = 'reply-started';
+    saveRecovery();
+    await request('/api/chat-messages/' + pending.id + '/reply', {reply: pending.replyText});
     conversation.pending = null;
+    saveRecovery();
   }
 
   async function maybeSendFollowup(page) {
@@ -271,30 +354,40 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
 
     const baselineAnswer = String(page.answer || '');
     const baselineQueryCount = Number(page.queryCount || 0);
+    const messageBody = String(message.body || '');
     conversation.pending = {
       id: Number(message.id),
+      body: messageBody,
       baselineAnswer,
+      baselineQueryCount,
       lastAnswer: baselineAnswer,
       changedAt: Date.now(),
-      phase: 'sending',
+      phase: 'claimed',
       failureDetail: '',
     };
+    saveRecovery();
     try {
-      await sendNativeText(String(message.body || ''));
+      conversation.pending.phase = 'submit-started';
+      saveRecovery();
+      await sendNativeText(conversation.pending.body);
       conversation.pending.phase = 'sent-awaiting-ack';
+      saveRecovery();
     } catch (error) {
       conversation.pending.failureDetail = String(error.message).slice(0, 300);
       if (error.uncertain) {
         try {
-          await verifySubmittedQuery(message.body, {baselineQueryCount, timeoutMs: 20000});
+          await verifySubmittedQuery(conversation.pending.body, {baselineQueryCount, timeoutMs: 20000});
           conversation.pending.phase = 'sent-awaiting-ack';
+          saveRecovery();
         } catch (verifyError) {
           conversation.pending.phase = 'send-uncertain';
           conversation.pending.failureDetail = String(verifyError.message).slice(0, 300);
+          saveRecovery();
           return;
         }
       } else {
         conversation.pending.phase = 'send-failed';
+        saveRecovery();
       }
     }
     await reconcilePendingDelivery();
@@ -303,17 +396,25 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
   async function monitor() {
     if (!conversation || !agentView || agentView.webContents.isDestroyed()) return;
     if (!isPerplexityUrl(agentView.webContents.getURL())) return;
-    const page = await pageRequest('state', {}, 5000);
+    let page = await pageRequest('state', {}, 5000);
     await publish(page);
-    if (conversation.openingUncertain) return;
+    if (conversation.openingCommand) {
+      if (!await recoverOpening(page)) return;
+      if (!conversation) return;
+      page = await pageRequest('state', {}, 5000);
+    }
     await finishOpening(page);
     if (!await reconcilePendingDelivery()) return;
     await finishFollowup(page);
     await maybeSendFollowup(page);
   }
 
+  function comparableQueryText(value) {
+    return String(value || '').replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/[*_`~]/g, '').replace(/\s+/g, ' ').trim();
+  }
+
   async function verifySubmittedQuery(text, options = {}) {
-    const tail = String(text || '').slice(-160);
+    const tail = comparableQueryText(text).slice(-160);
     const baselineQueryCount = Number(options.baselineQueryCount || 0);
     const requireConversationUrl = !!options.requireConversationUrl;
     const timeoutMs = Number(options.timeoutMs || 20000);
@@ -323,8 +424,14 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
       try {
         last = await pageRequest('state', {}, 5000);
         const urlOk = !requireConversationUrl || isConversationUrl(last.url);
-        if (urlOk && Number(last.queryCount || 0) > baselineQueryCount &&
-            String(last.lastQuery || '').includes(tail) && !String(last.draft || '').trim()) {
+        const queryCount = Number(last.queryCount || 0);
+        const recentQueries = Array.isArray(last.recentQueries) ? last.recentQueries : [last.lastQuery || ''];
+        const startIndex = Number.isFinite(Number(last.queryStartIndex))
+          ? Number(last.queryStartIndex)
+          : Math.max(0, queryCount - recentQueries.length);
+        const matchingRenderedQuery = recentQueries.some((query, index) =>
+          startIndex + index >= baselineQueryCount && comparableQueryText(query).includes(tail));
+        if (urlOk && queryCount > baselineQueryCount && matchingRenderedQuery && !String(last.draft || '').trim()) {
           return last;
         }
       } catch {
@@ -345,35 +452,63 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
 
     const ready = await resetConversationPage();
     const id = require('crypto').randomUUID();
+    const prompt = String(command.prompt || '');
+    const baselineQueryCount = Number(ready.queryCount || 0);
     conversation = {
       id,
       lane: String(command.lane || 'sup-perplexity').slice(0, 100),
       model: 'glm-5.3',
       reasoning: 'thinking',
+      pageUrl: HOME,
       pending: null,
       lastTranscript: '',
       openingBaseline: String(ready.answer || ''),
       openingLastAnswer: String(ready.answer || ''),
       openingChangedAt: Date.now(),
       openingDone: false,
+      openingUncertain: false,
+      openingCommand: {
+        id: Number(command.id),
+        prompt,
+        baselineQueryCount,
+        phase: 'claimed',
+        failureDetail: '',
+      },
     };
+    saveRecovery();
     let sent;
     try {
-      sent = await sendNativeText(String(command.prompt || ''), {allowConversationNavigation: true});
+      conversation.openingCommand.phase = 'submit-started';
+      saveRecovery();
+      sent = await sendNativeText(prompt, {allowConversationNavigation: true});
       if (sent.navigationAccepted) {
-        sent = await verifySubmittedQuery(command.prompt, {baselineQueryCount: 0, requireConversationUrl: true});
+        sent = await verifySubmittedQuery(prompt, {baselineQueryCount, requireConversationUrl: true});
       }
+      conversation.openingCommand.phase = 'sent-awaiting-result';
+      if (sent.url) conversation.pageUrl = String(sent.url);
+      saveRecovery();
     } catch (error) {
       const detail = String(error.message).slice(0, 300);
+      conversation.openingCommand.failureDetail = detail;
       if (error.uncertain) {
         try {
-          sent = await verifySubmittedQuery(command.prompt, {baselineQueryCount: 0, requireConversationUrl: true});
+          sent = await verifySubmittedQuery(prompt, {baselineQueryCount, requireConversationUrl: true});
+          conversation.openingCommand.phase = 'sent-awaiting-result';
+          conversation.openingUncertain = false;
+          if (sent.url) conversation.pageUrl = String(sent.url);
+          saveRecovery();
         } catch (verifyError) {
           conversation.openingUncertain = true;
-          return {ok: false, conversation_id: id, detail: String(verifyError.message).slice(0, 300)};
+          conversation.openingCommand.phase = 'send-uncertain';
+          conversation.openingCommand.failureDetail = String(verifyError.message).slice(0, 300);
+          saveRecovery();
+          return {defer: true, conversation_id: id, detail: conversation.openingCommand.failureDetail};
         }
       } else {
+        conversation.openingCommand.phase = 'send-failed';
+        saveRecovery();
         conversation = null;
+        clearRecovery();
         return {ok: false, conversation_id: id, detail};
       }
     }
@@ -382,6 +517,7 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
     } catch (error) {
       console.warn('Native Perplexity Dispatch publish after verified send:', error.message);
     }
+    saveRecovery();
     return {ok: true, conversation_id: id, detail: 'Opening prompt sent; ' + (sent.model || 'GLM 5.3 Thinking verified')};
   }
 
@@ -390,8 +526,185 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
       return {ok: false, detail: 'No native Perplexity conversation has this id'};
     }
     conversation = null;
+    clearRecovery();
     if (agentView && !agentView.webContents.isDestroyed()) agentView.webContents.loadURL(HOME);
     return {ok: true, conversation_id: command.conversation_id, detail: 'Native Perplexity conversation released'};
+  }
+
+  async function loadRecoveryPage() {
+    await ensureReady();
+    if (conversation && isConversationUrl(conversation.pageUrl) && agentView.webContents.getURL() !== conversation.pageUrl) {
+      await agentView.webContents.loadURL(conversation.pageUrl);
+    }
+    const deadline = Date.now() + 20000;
+    let page = null;
+    while (Date.now() < deadline) {
+      try {
+        page = await pageRequest('state', {}, 5000);
+        if (page.ready) return page;
+      } catch {
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (page) return page;
+    throw new Error('Recovered Perplexity page is not ready');
+  }
+
+  async function recoverOpening(page) {
+    if (!conversation || !conversation.openingCommand) return true;
+    const opening = conversation.openingCommand;
+    let sent = page;
+
+    if (opening.phase === 'claimed') {
+      try {
+        opening.phase = 'submit-started';
+        saveRecovery();
+        sent = await sendNativeText(opening.prompt, {allowConversationNavigation: true});
+        if (sent.navigationAccepted) {
+          sent = await verifySubmittedQuery(opening.prompt, {
+            baselineQueryCount: Number(opening.baselineQueryCount || 0),
+            requireConversationUrl: true,
+          });
+        }
+        opening.phase = 'sent-awaiting-result';
+        conversation.openingUncertain = false;
+        if (sent.url) conversation.pageUrl = String(sent.url);
+        saveRecovery();
+      } catch (error) {
+        opening.failureDetail = String(error.message).slice(0, 300);
+        if (!error.uncertain) {
+          opening.phase = 'send-failed';
+          saveRecovery();
+        }
+      }
+    }
+
+    if (opening.phase === 'submit-started' || opening.phase === 'send-uncertain') {
+      try {
+        sent = await verifySubmittedQuery(opening.prompt, {
+          baselineQueryCount: Number(opening.baselineQueryCount || 0),
+          requireConversationUrl: true,
+          timeoutMs: 5000,
+        });
+        opening.phase = 'sent-awaiting-result';
+        conversation.openingUncertain = false;
+        if (sent.url) conversation.pageUrl = String(sent.url);
+        saveRecovery();
+      } catch (error) {
+        opening.phase = 'send-uncertain';
+        opening.failureDetail = String(error.message).slice(0, 300);
+        conversation.openingUncertain = true;
+        saveRecovery();
+        return false;
+      }
+    }
+
+    if (opening.phase === 'send-failed') {
+      await request('/api/chat-commands/' + opening.id + '/result', {
+        ok: false,
+        conversation_id: conversation.id,
+        detail: opening.failureDetail || 'Perplexity send failed before recovery',
+      });
+      conversation = null;
+      clearRecovery();
+      return false;
+    }
+
+    if (opening.phase === 'sent-awaiting-result') {
+      try {
+        sent = await pageRequest('state', {}, 5000);
+        await publish(sent);
+      } catch (error) {
+        console.warn('Native Perplexity Dispatch recovery publish:', error.message);
+      }
+      await request('/api/chat-commands/' + opening.id + '/result', {
+        ok: true,
+        conversation_id: conversation.id,
+        detail: 'Recovered verified opening prompt without replay',
+      });
+      conversation.openingCommand = null;
+      conversation.openingUncertain = false;
+      saveRecovery();
+    }
+    return true;
+  }
+
+  async function recoverPendingDelivery() {
+    if (!conversation || !conversation.pending) return true;
+    const pending = conversation.pending;
+    if (!pending.body) {
+      pending.phase = 'send-uncertain';
+      pending.failureDetail = 'Recovered follow-up is missing its body; no automatic replay was attempted';
+      saveRecovery();
+      return false;
+    }
+
+    if (pending.phase === 'claimed') {
+      try {
+        pending.phase = 'submit-started';
+        saveRecovery();
+        await sendNativeText(pending.body);
+        pending.phase = 'sent-awaiting-ack';
+        saveRecovery();
+      } catch (error) {
+        pending.failureDetail = String(error.message).slice(0, 300);
+        if (!error.uncertain) {
+          pending.phase = 'send-failed';
+          saveRecovery();
+        }
+      }
+    }
+
+    if (pending.phase === 'submit-started' || pending.phase === 'send-uncertain') {
+      try {
+        await verifySubmittedQuery(pending.body, {
+          baselineQueryCount: Number(pending.baselineQueryCount || 0),
+          timeoutMs: 5000,
+        });
+        pending.phase = 'sent-awaiting-ack';
+        saveRecovery();
+      } catch (error) {
+        pending.phase = 'send-uncertain';
+        pending.failureDetail = String(error.message).slice(0, 300);
+        saveRecovery();
+        return false;
+      }
+    }
+    if (pending.phase === 'reply-started') {
+      await request('/api/chat-messages/' + pending.id + '/reply', {reply: String(pending.replyText || '').slice(0, 200000)});
+      conversation.pending = null;
+      saveRecovery();
+      return true;
+    }
+    return reconcilePendingDelivery();
+  }
+
+  async function recoverState() {
+    const stored = loadRecovery();
+    if (!stored) return true;
+    hydrateRecovery(stored);
+    const page = await loadRecoveryPage();
+    if (conversation.openingCommand && !await recoverOpening(page)) return false;
+    if (!conversation) return true;
+    if (conversation.pending && !await recoverPendingDelivery()) return false;
+    if (!conversation) return true;
+    try {
+      await publish(await pageRequest('state', {}, 5000));
+    } catch (error) {
+      console.warn('Native Perplexity Dispatch recovered state publish:', error.message);
+    }
+    return true;
+  }
+
+  async function reportCommandResult(command, result) {
+    if (result && result.defer) return;
+    await request('/api/chat-commands/' + command.id + '/result', result);
+    if (command.kind === 'open' && result && result.ok && conversation &&
+        conversation.openingCommand && Number(conversation.openingCommand.id) === Number(command.id)) {
+      conversation.openingCommand = null;
+      conversation.openingUncertain = false;
+      saveRecovery();
+    }
   }
 
   async function controllerReady() {
@@ -404,7 +717,7 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
   }
 
   async function tick() {
-    if (running) return;
+    if (!recoveryReady || running) return;
     running = true;
     try {
       if (!await controllerReady()) return;
@@ -417,7 +730,7 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
           if (command.kind === 'open') result = await openConversation(command);
           else if (command.kind === 'close') result = await closeConversation(command);
           else result = {ok: false, detail: 'PR2 accepts only open and close commands'};
-          await request('/api/chat-commands/' + command.id + '/result', result);
+          await reportCommandResult(command, result);
           return;
         }
         try {
@@ -438,7 +751,7 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
       if (command.kind === 'open') result = await openConversation(command);
       else if (command.kind === 'close') result = await closeConversation(command);
       else result = {ok: false, detail: 'PR2 accepts only open and close commands'};
-      await request('/api/chat-commands/' + command.id + '/result', result);
+      await reportCommandResult(command, result);
     } catch (error) {
       console.warn('Native Perplexity Dispatch:', error.message);
     } finally {
@@ -448,9 +761,22 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
 
   function start() {
     if (timer) return;
+    recoveryReady = false;
     ipcMain.on('simplexity-native-dispatch-result', onPageResult);
-    tick();
+    const attemptRecovery = async () => {
+      if (recoveryReady || !timer) return;
+      try {
+        const resolved = await recoverState();
+        if (!resolved) return;
+        recoveryReady = true;
+        tick();
+      } catch (error) {
+        console.warn('Native Perplexity Dispatch recovery:', error.message);
+        setTimeout(attemptRecovery, 2000);
+      }
+    };
     timer = setInterval(tick, 2000);
+    attemptRecovery();
   }
 
   function stop() {

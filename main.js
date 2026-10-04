@@ -98,7 +98,7 @@ let searchService;
 let prefixSearchWindow = null; 
 let launchedHidden = process.argv.includes('--hidden') || process.argv.includes('--start-minimized');
 let layoutCheckInterval;
-const useNativeDispatch = process.argv.includes('--native-dispatch');
+const useNativeDispatch = !process.argv.includes('--no-native-dispatch');
 let nativeDispatch = null;
 
 let autoStartEnabled = settings.get('autoStartEnabled', false);
@@ -1755,7 +1755,7 @@ app.whenReady().then(() => {
     
     startLayoutChecks();
     if (useNativeDispatch) {
-      nativeDispatch = createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path, appDir: __dirname});
+      nativeDispatch = createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path, settings, appDir: __dirname});
       nativeDispatch.start();
     }
     
