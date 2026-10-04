@@ -150,6 +150,215 @@ window.addEventListener('DOMContentLoaded', () => {
         syncSidebarLinks();
     }).catch(() => {});
 
+    // App-wide Perplexity policy: keep GLM 5.3 + Thinking selected and answer
+    // Perplexity's generic yes/no continuation prompt once per rendered answer.
+    const POLICY_ANSWERS = '[data-message-author-role="assistant"], [data-role="assistant"], [data-testid="assistant-message"], [data-testid="answer"], .prose';
+    const policySleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const policyVisible = (el) => !!el && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+    const policyText = (el) => (el?.getAttribute('aria-label') || el?.getAttribute('title') || el?.innerText || '').replace(/\s+/g, ' ').trim();
+    const policyControls = (root = document) => [...root.querySelectorAll('button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="switch"]')].filter(policyVisible);
+    const policyMenus = () => [...document.querySelectorAll('[role="menu"], [data-radix-menu-content]')].filter(policyVisible);
+    const policyChecked = (el) => {
+        if (!el) return null;
+        const value = String(el.getAttribute('aria-checked') || el.getAttribute('data-state') || '').toLowerCase();
+        return ['true', 'checked', 'on', 'selected'].includes(value) ? true : ['false', 'unchecked', 'off'].includes(value) ? false : null;
+    };
+    const policyModelKey = (value) => String(value).toLowerCase().replace(/\b(?:thinking|max)\b/g, '').replace(/[^a-z0-9]/g, '');
+    const policyIsNativeAgent = process.argv.includes('--simplexity-native-agent');
+    const policyDefaultModel = {model: 'glm-5.3', thinking: true};
+    let policyPreferredModel = {...policyDefaultModel};
+    let policyPreferenceReady = policyIsNativeAgent;
+    if (!policyIsNativeAgent) {
+        ipcRenderer.invoke('get-perplexity-model-policy').then((value) => {
+            if (value?.model === 'gemini-3.8-flash') policyPreferredModel = {model: 'gemini-3.8-flash', thinking: false};
+            else policyPreferredModel = {...policyDefaultModel};
+            policyPreferenceReady = true;
+            schedulePerplexityPolicy();
+        }).catch(() => { policyPreferenceReady = true; });
+        ipcRenderer.on('perplexity-model-policy-changed', (_event, value) => {
+            policyPreferredModel = value?.model === 'gemini-3.8-flash'
+                ? {model: 'gemini-3.8-flash', thinking: false}
+                : {...policyDefaultModel};
+            schedulePerplexityPolicy();
+        });
+    }
+    const policyCloseMenus = () => document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', code: 'Escape', bubbles: true}));
+    const policyClickMenu = (el) => {
+        const event = {bubbles: true, button: 0, pointerType: 'mouse', isPrimary: true};
+        el.dispatchEvent(new PointerEvent('pointerdown', event));
+        el.dispatchEvent(new PointerEvent('pointerup', event));
+        el.click();
+    };
+    const policyWaitFor = async (read, ms = 4000) => {
+        const until = Date.now() + ms;
+        while (Date.now() < until) {
+            const value = read();
+            if (value) return value;
+            await policySleep(100);
+        }
+        return null;
+    };
+    const policyEditor = () => [...document.querySelectorAll('textarea, [contenteditable="true"][role="textbox"], .ProseMirror[contenteditable="true"], [contenteditable="true"][data-placeholder]')]
+        .find((el) => policyVisible(el) && !el.disabled && !/search (?:sessions|connectors)/i.test(el.getAttribute('placeholder') || '')) || null;
+    const policyDraft = (el) => {
+        if (!el) return '';
+        if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') return (el.value || '').trim();
+        const clone = el.cloneNode(true);
+        clone.querySelectorAll('[contenteditable="false"]').forEach((node) => node.remove());
+        return (clone.textContent || '').trim();
+    };
+    const policyRoot = () => [...document.querySelectorAll('main, [role="main"], [role="log"], [data-testid="thread-content"]')].find(policyVisible) || null;
+    const policyAnswerState = () => {
+        const area = policyRoot();
+        if (!area) return {text: '', turn: 0};
+        const found = [...area.querySelectorAll(POLICY_ANSWERS)].filter((el) => policyVisible(el) && !el.closest('[data-message-author-role="user"], [data-role="user"]'));
+        const leaves = found.filter((el) => !found.some((parent) => parent !== el && parent.contains(el)));
+        return {text: (leaves.at(-1)?.innerText || '').trim(), turn: leaves.length};
+    };
+    const policyBusy = () => policyControls().some((el) => /^stop(?:\s+(?:generating|response|answer|task|work|research))?(?:\s*\(Esc\))?$/i.test(policyText(el))) ||
+        [...(policyRoot()?.querySelectorAll('[aria-busy="true"]') || [])].some(policyVisible);
+    const policyApprovalDialog = () => [...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')].some(policyVisible);
+    const policyProtectedAction = (text) => {
+        const body = String(text || '').replace(/\s+/g, ' ');
+        return /\b(?:send|sending|deliver|delivering)\b.{0,60}\be-?mail\b|\b(?:send_email|send_mail|gmail_send|outlook_send|dispatch_new)\b|["']agent["']\s*:\s*["']droid["']|\b(?:use|using|call|calling|dispatch|dispatching|pay|buy)\b.{0,60}\bOpenRouter\b|\bOpenRouter\b.{0,60}\bAPI (?:call|request)\b/i.test(body);
+    };
+    const policyModelControl = () => {
+        const editor = policyEditor();
+        const area = editor?.closest('form') || editor?.parentElement?.parentElement?.parentElement;
+        return policyControls(area || document).find((el) =>
+            /^Model$/i.test(policyText(el)) || /\b(?:GLM|GPT|Gemini|Claude|Grok|Kimi|Nemotron|Best)(?=\d|[\s-]|$)/i.test(policyText(el))) || null;
+    };
+
+    let policyModelRunning = false;
+    let policyUserModelMenuUntil = 0;
+    async function policyEnforceModel() {
+        if (policyModelRunning || !policyPreferenceReady || (!policyIsNativeAgent && Date.now() < policyUserModelMenuUntil)) return;
+        const target = policyIsNativeAgent ? policyDefaultModel : policyPreferredModel;
+        const wanted = target.model === 'gemini-3.8-flash' ? 'gemini-3.8-flash' : 'glm-5.3';
+        const button = policyModelControl();
+        if (!button) return;
+        const current = policyText(button);
+        const explicitCurrent = !/^Model$/i.test(current);
+        const currentMatches = explicitCurrent && policyModelKey(current) === policyModelKey(wanted) &&
+            (wanted !== 'glm-5.3' || /\bThinking\b/i.test(current));
+        if (currentMatches) return;
+        policyModelRunning = true;
+        try {
+            policyClickMenu(button);
+            if (!explicitCurrent) {
+                const selected = await policyWaitFor(() => policyMenus().flatMap((menu) => policyControls(menu))
+                    .find((el) => policyChecked(el) === true), 1500);
+                const selectedText = policyText(selected);
+                const selectedMatches = selected && policyModelKey(selectedText) === policyModelKey(wanted) &&
+                    (wanted !== 'glm-5.3' || /\bThinking\b/i.test(selectedText));
+                if (selectedMatches) {
+                    policyCloseMenus();
+                    return;
+                }
+            }
+            const item = await policyWaitFor(() => policyMenus().flatMap((menu) => policyControls(menu))
+                .find((el) => policyModelKey(policyText(el)) === policyModelKey(wanted)), 4000);
+            if (!item || item.disabled || item.getAttribute('aria-disabled') === 'true' || /\bMax\b/.test(policyText(item))) {
+                policyCloseMenus();
+                throw new Error(`${wanted} is unavailable or locked`);
+            }
+            if (wanted === 'glm-5.3') {
+                item.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
+                item.dispatchEvent(new PointerEvent('pointermove', {bubbles: true, pointerType: 'mouse'}));
+                const toggle = await policyWaitFor(() => policyMenus().flatMap((menu) => policyControls(menu))
+                    .find((el) => policyText(el) === 'Thinking' || el.getAttribute('role') === 'switch'), 1500);
+                if (toggle && policyChecked(toggle) !== true) toggle.click();
+            }
+            item.click();
+            policyCloseMenus();
+            const chosen = await policyWaitFor(() => {
+                const value = policyText(policyModelControl());
+                const modelMatches = policyModelKey(value) === policyModelKey(wanted);
+                const thinkingMatches = wanted !== 'glm-5.3' || /\bThinking\b/i.test(value);
+                return modelMatches && thinkingMatches ? value : null;
+            }, 4000);
+            if (!chosen) throw new Error(`Perplexity did not confirm ${wanted}${wanted === 'glm-5.3' ? ' with Thinking enabled' : ''}`);
+        } finally {
+            policyModelRunning = false;
+        }
+    }
+
+    document.addEventListener('pointerdown', (event) => {
+        if (policyIsNativeAgent || !event.isTrusted) return;
+        const control = event.target?.closest?.('button, [role="button"]');
+        if (!control || control.closest('[role="menu"], [data-radix-menu-content]')) return;
+        const value = policyText(control);
+        if (/^Model$/i.test(value) || /\b(?:GLM|GPT|Gemini|Claude|Grok|Kimi|Nemotron|Best)(?=\d|[\s-]|$)/i.test(value)) {
+            policyUserModelMenuUntil = Date.now() + 5000;
+        }
+    }, true);
+
+    document.addEventListener('click', (event) => {
+        if (policyIsNativeAgent || !event.isTrusted) return;
+        const control = event.target?.closest?.('button, [role="button"], [role="menuitem"], [role="menuitemradio"]');
+        if (!control || !control.closest('[role="menu"], [data-radix-menu-content]')) return;
+        const value = policyText(control);
+        let next = null;
+        if (policyModelKey(value) === policyModelKey('glm-5.3')) next = {model: 'glm-5.3', thinking: true};
+        else if (policyModelKey(value) === policyModelKey('gemini-3.8-flash')) next = {model: 'gemini-3.8-flash', thinking: false};
+        if (!next) return;
+        policyPreferredModel = next;
+        policyPreferenceReady = true;
+        policyUserModelMenuUntil = 0;
+        ipcRenderer.invoke('set-perplexity-model-policy', next).catch(() => {});
+    }, true);
+
+    const POLICY_CONFIRMATION = /\bReply\s+(?:with\s+)?(?:\*\*)?["“'‘]?yes["”'’]?(?:\*\*)?\s+to\s+proceed\s*,?\s+or\s+(?:\*\*)?["“'‘]?no["”'’]?(?:\*\*)?\s+to\s+cancel\.?/i;
+    let policyLastYesKey = '';
+    async function policyAutoYes() {
+        const answerState = policyAnswerState();
+        const answer = answerState.text;
+        if (!POLICY_CONFIRMATION.test(answer) || policyBusy() || policyApprovalDialog() || policyProtectedAction(answer)) return;
+        const key = `${location.pathname}|${answerState.turn}|${answer}`;
+        if (policyLastYesKey === key) return;
+        const editor = policyEditor();
+        if (!editor || policyDraft(editor)) return;
+        editor.focus();
+        const inserted = await ipcRenderer.invoke('perplexity-policy-insert-text', 'yes');
+        if (!inserted) return;
+        await policySleep(100);
+        if (policyDraft(editor).toLowerCase() !== 'yes') return;
+        const form = editor.closest('form');
+        const scopes = [form, policyRoot(), document].filter(Boolean);
+        let button = null;
+        for (const scope of scopes) {
+            button = policyControls(scope).find((node) => !node.disabled &&
+                (node.type === 'submit' || /^(?:send|submit|ask)(?: message| prompt| question| perplexity)?$|^start task$/i.test(policyText(node))));
+            if (button) break;
+        }
+        if (!button) return;
+        policyLastYesKey = key;
+        button.click();
+    }
+
+    let policyRunActive = false;
+    let policyDebounce = null;
+    async function runPerplexityPolicy() {
+        if (policyRunActive) return;
+        policyRunActive = true;
+        try {
+            await policyEnforceModel();
+            await policyAutoYes();
+        } catch (error) {
+            console.warn('Simplexity Perplexity policy:', error.message);
+        } finally {
+            policyRunActive = false;
+        }
+    }
+    const schedulePerplexityPolicy = () => {
+        clearTimeout(policyDebounce);
+        policyDebounce = setTimeout(runPerplexityPolicy, 120);
+    };
+    const policyObserver = new MutationObserver(schedulePerplexityPolicy);
+    policyObserver.observe(document.body, {childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['aria-label', 'aria-checked', 'data-state']});
+    setInterval(runPerplexityPolicy, 1000);
+    setTimeout(runPerplexityPolicy, 250);
+
     if (process.argv.includes('--simplexity-native-agent')) {
     // Native Dispatch bridge. The page can only answer narrow requests from the
     // Electron main process. It cannot reach the controller directly.
@@ -204,6 +413,7 @@ window.addEventListener('DOMContentLoaded', () => {
     }
 
     function nativeNeedsApproval(text) {
+        if (POLICY_CONFIRMATION.test(text || '')) return true;
         if ([...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')].some(nativeVisible)) return true;
         return /confirm_action|(?:I need|I require|waiting for|requires? your|please give|please grant).{0,60}(?:permission|approval|consent)|please confirm|(?:sign[ -]?in|log[ -]?in|authorize).{0,35}(?:to continue|before|access)|(?:click|select|press).{0,30}(?:allow|approve|authorize|confirm)|complete.{0,20}captcha/i.test(text || '');
     }
@@ -247,7 +457,7 @@ window.addEventListener('DOMContentLoaded', () => {
         };
     }
 
-    async function nativeSend(text) {
+    function nativePrepareSend() {
         const state = nativeState();
         const editor = nativeEditor();
         if (!state.ready || !editor) throw new Error('Perplexity Search composer is not ready');
@@ -256,45 +466,33 @@ window.addEventListener('DOMContentLoaded', () => {
         if (!/glm\s*-?\s*5\.3/i.test(state.model) || !/thinking/i.test(state.model)) {
             throw new Error(`Expected GLM 5.3 Thinking before send; found ${state.model || 'no readable model label'}`);
         }
-
-        const queryCount = nativeRoot()?.querySelectorAll(NATIVE_QUERIES).length || 0;
         editor.focus();
-        if (editor.tagName === 'TEXTAREA') {
-            Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(editor, text);
-            editor.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: text}));
-        } else {
-            const range = document.createRange();
-            const paragraphs = editor.querySelectorAll('p');
-            range.selectNodeContents(paragraphs.length ? paragraphs[paragraphs.length - 1] : editor);
-            range.collapse(false);
-            const selection = window.getSelection();
-            selection.removeAllRanges();
-            selection.addRange(range);
-            if (!document.execCommand('insertText', false, text)) throw new Error('Perplexity editor did not accept the text');
+        return state;
+    }
+
+    async function nativeSubmit(text, baselineQueryCount) {
+        const editor = nativeEditor();
+        if (!editor) throw new Error('Perplexity Search composer is not ready');
+        const draftText = nativeDraft(editor);
+        if (draftText !== text) {
+            throw new Error('Perplexity editor does not contain the requested text; no submit was clicked');
         }
 
-        await nativeSleep(150);
-        const form = editor.closest('form');
-        const scopes = [form, nativeRoot(), document].filter(Boolean);
+        const scopes = [nativeRoot(), document].filter(Boolean);
         let button = null;
         for (const scope of scopes) {
             button = [...scope.querySelectorAll('button')].find((node) => nativeVisible(node) && !node.disabled &&
-                (node.type === 'submit' || /^(?:send|submit|ask)(?: message| prompt| question| perplexity)?$|^start task$/i.test(nativeLabel(node))));
+                /^(?:send|submit|ask)(?: message| prompt| question| perplexity)?$|^start task$/i.test(nativeLabel(node)));
             if (button) break;
         }
-        if (button) {
-            button.click();
-        } else if (form && typeof form.requestSubmit === 'function') {
-            form.requestSubmit();
-        } else {
-            editor.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', bubbles: true, cancelable: true}));
-            editor.dispatchEvent(new KeyboardEvent('keyup', {key: 'Enter', code: 'Enter', bubbles: true, cancelable: true}));
-        }
+        if (!button) throw new Error('Perplexity Submit button was not found; no submit was clicked');
+        button.click();
 
         const until = Date.now() + 30000;
         while (Date.now() < until) {
             const queries = [...(nativeRoot()?.querySelectorAll(NATIVE_QUERIES) || [])];
-            const accepted = queries.length > queryCount && (queries.at(-1)?.innerText || '').includes(text.slice(-160));
+            const accepted = queries.length > Number(baselineQueryCount || 0) &&
+                (queries.at(-1)?.innerText || '').includes(text.slice(-160));
             if (!nativeDraft(nativeEditor()) && accepted) return nativeState();
             await nativeSleep(250);
         }
@@ -306,7 +504,9 @@ window.addEventListener('DOMContentLoaded', () => {
         try {
             let result;
             if (message?.type === 'probe' || message?.type === 'state') result = nativeState();
-            else if (message?.type === 'send') result = await nativeSend(String(message?.payload?.text || ''));
+            else if (message?.type === 'prepare-send') result = nativePrepareSend();
+            else if (message?.type === 'submit') result = await nativeSubmit(
+                String(message?.payload?.text || ''), Number(message?.payload?.baselineQueryCount || 0));
             else throw new Error('Unknown native Dispatch page command');
             ipcRenderer.send('simplexity-native-dispatch-result', {requestId, ok: true, result});
         } catch (error) {
@@ -315,7 +515,7 @@ window.addEventListener('DOMContentLoaded', () => {
                 requestId,
                 ok: false,
                 detail,
-                uncertain: /^Send outcome is unknown;/i.test(detail),
+                uncertain: message?.type === 'submit' && /^Send outcome is unknown;/i.test(detail),
             });
         }
     });

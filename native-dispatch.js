@@ -77,7 +77,7 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
       };
       const timerId = setTimeout(() => {
         const error = new Error('Perplexity page did not answer ' + type);
-        error.uncertain = type === 'send';
+        error.uncertain = type === 'submit';
         finishReject(error);
       }, timeoutMs);
       pendingPage.set(id, {resolve: finishResolve, reject: finishReject});
@@ -88,12 +88,24 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
       try {
         webContents.send('simplexity-native-dispatch-command', {requestId: id, type, payload});
       } catch (error) {
-        error.uncertain = type === 'send';
+        error.uncertain = type === 'submit';
         finishReject(error);
       }
     });
   }
 
+  async function sendNativeText(text, options = {}) {
+    const prepared = await pageRequest('prepare-send', {}, 5000);
+    const webContents = agentView && agentView.webContents;
+    if (!webContents || webContents.isDestroyed()) throw new Error('Native Perplexity Agent BrowserView is unavailable');
+    webContents.focus();
+    await webContents.insertText(String(text || ''));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    return pageRequest('submit', {
+      text: String(text || ''),
+      baselineQueryCount: Number(prepared.queryCount || 0),
+    }, 35000, options);
+  }
   function onPageResult(event, message) {
     if (!agentView || event.sender !== agentView.webContents) return;
     if (!isPerplexityUrl(event.sender.getURL())) return;
@@ -268,7 +280,7 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
       failureDetail: '',
     };
     try {
-      await pageRequest('send', {text: String(message.body || '')}, 35000);
+      await sendNativeText(String(message.body || ''));
       conversation.pending.phase = 'sent-awaiting-ack';
     } catch (error) {
       conversation.pending.failureDetail = String(error.message).slice(0, 300);
@@ -347,7 +359,7 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
     };
     let sent;
     try {
-      sent = await pageRequest('send', {text: String(command.prompt || '')}, 35000, {allowConversationNavigation: true});
+      sent = await sendNativeText(String(command.prompt || ''), {allowConversationNavigation: true});
       if (sent.navigationAccepted) {
         sent = await verifySubmittedQuery(command.prompt, {baselineQueryCount: 0, requireConversationUrl: true});
       }

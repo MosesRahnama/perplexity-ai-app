@@ -1461,6 +1461,50 @@ ipcMain.on('set-settings', (event, data) => {
 // The sidebar injector in preload_inject.js asks for this on every page load.
 ipcMain.handle('get-sidebar-shortcuts', () => settings.get('sidebarShortcuts', []));
 
+// Perplexity app policy uses Electron's native text insertion so both visible
+// BrowserViews and the hidden agent view can enter a one-word confirmation
+// without depending on Perplexity's editor implementation.
+ipcMain.handle('perplexity-policy-insert-text', (event, text) => {
+  try {
+    const url = new URL(event.sender.getURL());
+    if (url.protocol !== 'https:' || !['perplexity.ai', 'www.perplexity.ai'].includes(url.hostname)) {
+      throw new Error('Perplexity text insertion is only available on perplexity.ai');
+    }
+    const value = String(text || '').slice(0, 32);
+    if (!value) return false;
+    event.sender.insertText(value);
+    return true;
+  } catch (error) {
+    console.warn('Perplexity policy insert:', error.message);
+    return false;
+  }
+});
+
+const DEFAULT_PERPLEXITY_MODEL_POLICY = {model: 'glm-5.3', thinking: true};
+function normalizePerplexityModelPolicy(value) {
+  const model = String(value?.model || '').toLowerCase();
+  if (model === 'gemini-3.8-flash') return {model: 'gemini-3.8-flash', thinking: false};
+  return {...DEFAULT_PERPLEXITY_MODEL_POLICY};
+}
+ipcMain.handle('get-perplexity-model-policy', () =>
+  normalizePerplexityModelPolicy(settings.get('perplexityModelPolicy', DEFAULT_PERPLEXITY_MODEL_POLICY)));
+ipcMain.handle('set-perplexity-model-policy', (event, value) => {
+  try {
+    const url = new URL(event.sender.getURL());
+    if (url.protocol !== 'https:' || !['perplexity.ai', 'www.perplexity.ai'].includes(url.hostname)) return null;
+    const normalized = normalizePerplexityModelPolicy(value);
+    settings.set('perplexityModelPolicy', normalized);
+    Object.values(views).forEach((view) => {
+      if (view?.webContents && !view.webContents.isDestroyed()) {
+        view.webContents.send('perplexity-model-policy-changed', normalized);
+      }
+    });
+    return normalized;
+  } catch {
+    return null;
+  }
+});
+
 function broadcastSidebarShortcuts() {
   const ids = settings.get('sidebarShortcuts', []);
   Object.values(views).forEach((view) => {
