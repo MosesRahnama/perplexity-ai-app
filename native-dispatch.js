@@ -36,27 +36,28 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
 
   function pageRequest(type, payload = {}, timeoutMs = 15000) {
     if (!agentView || agentView.webContents.isDestroyed()) {
-      if (!agentHostWindow || agentHostWindow.isDestroyed()) {
-        agentHostWindow = new BrowserWindow({
-          show: false,
-          width: 1280,
-          height: 900,
-          webPreferences: {contextIsolation: true, nodeIntegration: false},
-        });
-      }
       return Promise.reject(new Error('Native Perplexity Agent BrowserView is unavailable'));
     }
     const id = ++requestId;
     return new Promise((resolve, reject) => {
       const timerId = setTimeout(() => {
         pendingPage.delete(id);
-        reject(new Error('Perplexity page did not answer ' + type));
+        const error = new Error('Perplexity page did not answer ' + type);
+        error.uncertain = type === 'send';
+        reject(error);
       }, timeoutMs);
       pendingPage.set(id, {
         resolve: (value) => { clearTimeout(timerId); resolve(value); },
         reject: (error) => { clearTimeout(timerId); reject(error); },
       });
-      agentView.webContents.send('simplexity-native-dispatch-command', {requestId: id, type, payload});
+      try {
+        agentView.webContents.send('simplexity-native-dispatch-command', {requestId: id, type, payload});
+      } catch (error) {
+        clearTimeout(timerId);
+        pendingPage.delete(id);
+        error.uncertain = type === 'send';
+        reject(error);
+      }
     });
   }
 
@@ -67,8 +68,13 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
     const pending = pendingPage.get(id);
     if (!pending) return;
     pendingPage.delete(id);
-    if (message && message.ok) pending.resolve(message.result || {});
-    else pending.reject(new Error(String((message && message.detail) || 'Perplexity page action failed').slice(0, 300)));
+    if (message && message.ok) {
+      pending.resolve(message.result || {});
+    } else {
+      const error = new Error(String((message && message.detail) || 'Perplexity page action failed').slice(0, 300));
+      error.uncertain = !!(message && message.uncertain);
+      pending.reject(error);
+    }
   }
 
   async function ensureReady() {
@@ -173,6 +179,7 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
   async function reconcilePendingDelivery() {
     const pending = conversation && conversation.pending;
     if (!pending) return true;
+    if (pending.phase === 'send-uncertain') return false;
     if (pending.phase === 'send-failed') {
       try {
         await request('/api/chat-messages/' + pending.id + '/delivered', {
@@ -230,8 +237,12 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
       await pageRequest('send', {text: String(message.body || '')}, 35000);
       conversation.pending.phase = 'sent-awaiting-ack';
     } catch (error) {
-      conversation.pending.phase = 'send-failed';
       conversation.pending.failureDetail = String(error.message).slice(0, 300);
+      if (error.uncertain) {
+        conversation.pending.phase = 'send-uncertain';
+        return;
+      }
+      conversation.pending.phase = 'send-failed';
     }
     await reconcilePendingDelivery();
   }
@@ -241,6 +252,7 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
     if (!isPerplexityUrl(agentView.webContents.getURL())) return;
     const page = await pageRequest('state', {}, 5000);
     await publish(page);
+    if (conversation.openingUncertain) return;
     await finishOpening(page);
     if (!await reconcilePendingDelivery()) return;
     await finishFollowup(page);
@@ -274,6 +286,10 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
       sent = await pageRequest('send', {text: String(command.prompt || '')}, 35000);
     } catch (error) {
       const detail = String(error.message).slice(0, 300);
+      if (error.uncertain) {
+        conversation.openingUncertain = true;
+        return {ok: false, conversation_id: id, detail};
+      }
       conversation = null;
       return {ok: false, conversation_id: id, detail};
     }
@@ -308,8 +324,27 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
     running = true;
     try {
       if (!await controllerReady()) return;
-      if (conversation) await monitor();
-      else await ensureReady();
+      if (conversation) {
+        const claimed = await request('/api/chat-commands/next', {surface: SURFACE});
+        const command = claimed.command;
+        if (command) {
+          if (command.surface !== SURFACE) throw new Error('Dispatch returned a command for a different surface');
+          let result;
+          if (command.kind === 'open') result = await openConversation(command);
+          else if (command.kind === 'close') result = await closeConversation(command);
+          else result = {ok: false, detail: 'PR2 accepts only open and close commands'};
+          await request('/api/chat-commands/' + command.id + '/result', result);
+          return;
+        }
+        try {
+          await monitor();
+        } catch (error) {
+          console.warn('Native Perplexity Dispatch monitor:', error.message);
+        }
+        return;
+      }
+
+      await ensureReady();
       const claimed = await request('/api/chat-commands/next', {surface: SURFACE});
       const command = claimed.command;
       if (!command) return;

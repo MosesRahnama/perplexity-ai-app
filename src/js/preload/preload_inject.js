@@ -271,11 +271,22 @@ window.addEventListener('DOMContentLoaded', () => {
         }
 
         await nativeSleep(150);
-        const area = editor.closest('form') || editor.parentElement?.parentElement?.parentElement || editor.parentElement;
-        const button = [...area.querySelectorAll('button')].find((node) => nativeVisible(node) && !node.disabled &&
-            (node.type === 'submit' || /^(?:send|submit|ask)(?: message| prompt| question| perplexity)?$|^start task$/i.test(nativeLabel(node))));
-        if (!button) throw new Error('Send button was not found; the draft was left in place');
-        button.click();
+        const form = editor.closest('form');
+        const scopes = [form, nativeRoot(), document].filter(Boolean);
+        let button = null;
+        for (const scope of scopes) {
+            button = [...scope.querySelectorAll('button')].find((node) => nativeVisible(node) && !node.disabled &&
+                (node.type === 'submit' || /^(?:send|submit|ask)(?: message| prompt| question| perplexity)?$|^start task$/i.test(nativeLabel(node))));
+            if (button) break;
+        }
+        if (button) {
+            button.click();
+        } else if (form && typeof form.requestSubmit === 'function') {
+            form.requestSubmit();
+        } else {
+            editor.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', bubbles: true, cancelable: true}));
+            editor.dispatchEvent(new KeyboardEvent('keyup', {key: 'Enter', code: 'Enter', bubbles: true, cancelable: true}));
+        }
 
         const until = Date.now() + 30000;
         while (Date.now() < until) {
@@ -296,7 +307,13 @@ window.addEventListener('DOMContentLoaded', () => {
             else throw new Error('Unknown native Dispatch page command');
             ipcRenderer.send('simplexity-native-dispatch-result', {requestId, ok: true, result});
         } catch (error) {
-            ipcRenderer.send('simplexity-native-dispatch-result', {requestId, ok: false, detail: String(error.message).slice(0, 300)});
+            const detail = String(error.message).slice(0, 300);
+            ipcRenderer.send('simplexity-native-dispatch-result', {
+                requestId,
+                ok: false,
+                detail,
+                uncertain: /^Send outcome is unknown;/i.test(detail),
+            });
         }
     });
     }
