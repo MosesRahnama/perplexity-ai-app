@@ -5,9 +5,16 @@ const Store = require('electron-store');
 const marked = require('marked');
 const windowStateKeeper = require('electron-window-state');
 
+const DEV_PROFILE_FLAG = '--dev-profile';
+const useDevProfile = process.argv.includes(DEV_PROFILE_FLAG);
+if (useDevProfile) {
+  app.setPath('userData', path.join(app.getPath('appData'), 'SimplexityAI-dev'));
+}
+
 // Migrate settings from older app versions if this is a fresh install
 // Migration chain: perplexity-ai-app → simplexity-ai-app
 (function migrateOldSettings() {
+  if (useDevProfile) return;
   try {
     const appDataBase = app.getPath('appData');
     const newAppDataDir = app.getPath('userData'); // .../simplexity-ai-app
@@ -1183,7 +1190,7 @@ ipcMain.on('remind-tomorrow-update', () => {
 });
 
 ipcMain.on('download-update', () => {
-  const downloadUrl = 'https://github.com/inulute/simplexity-ai-app/releases/latest';
+  const downloadUrl = 'https://github.com/MosesRahnama/perplexity-ai-app/releases/latest';
   
   shell.openExternal(downloadUrl);
   
@@ -1213,7 +1220,7 @@ function performUpdateCheck(currentVersion, retryCount) {
   const maxRetries = 3;
   
   const timestamp = Date.now();
-  const url = `https://raw.githubusercontent.com/inulute/simplexity-ai-app/main/package.json?_=${timestamp}`;
+  const url = `https://raw.githubusercontent.com/MosesRahnama/perplexity-ai-app/main/package.json?_=${timestamp}`;
   
   const request = net.request({
     url: url,
