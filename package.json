@@ -6,15 +6,17 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "start-dev": "electron . --dev-profile",
     "start-minimized": "electron . --hidden",
     "build": "electron-builder --publish never",
     "package-win": "electron-builder --win --publish never",
     "package-mac": "electron-builder --mac --publish never",
     "package-linux": "electron-builder --linux --publish never",
     "postinstall": "electron-builder install-app-deps",
-    "package-auto": "node build-auto.js"
+    "package-auto": "node build-auto.js",
+    "check": "node --check main.js && node --check notification-manager.js && node --check search-service.js && node --check build-auto.js && node --check src/js/preload/preload.js && node --check src/js/preload/preload_inject.js && node --check src/js/preload/preload_notification.js && node --check src/js/preload/preload_notification_panel.js && node --check src/js/preload/preload_prefix.js && node --check src/js/preload/preload_update.js && node --check src/js/renderer/notification_panel_renderer.js && node --check src/js/renderer/notification_renderer.js && node --check src/js/renderer/renderer.js && node --check src/js/renderer/update_renderer.js"
   },
-  "repository": "https://github.com/inulute/simplexity-ai-app",
+  "repository": "https://github.com/MosesRahnama/perplexity-ai-app",
   "author": "inulute <inulute@users.noreply.github.com>",
   "license": "GPL-3.0-only",
   "dependencies": {

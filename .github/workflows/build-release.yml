@@ -1,6 +1,9 @@
 name: Build & Release
 
 on:
+  pull_request:
+    branches:
+      - main
   push:
     tags:
       - 'v*'
@@ -16,7 +19,28 @@ permissions:
   contents: read
 
 jobs:
+  validate:
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Check JavaScript syntax
+        run: npm run check
+      - name: Validate Windows package
+        run: npx electron-builder --win --dir --publish never
+
   build:
+    if: github.event_name != 'pull_request'
     # No `contents: write` and no GH_TOKEN here on purpose: electron-builder
     # defaults `--publish` to "onTag" whenever a CI tag is present, and will
     # silently upload every artifact (plus .blockmap / latest*.yml) to the
@@ -133,9 +157,6 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
-      # Required by actions/attest-build-provenance (keyless Sigstore signing).
-      id-token: write
-      attestations: write
 
     steps:
       - name: Checkout
@@ -146,10 +167,8 @@ jobs:
         with:
           path: dist
 
-      # Flatten every artifact into one directory so the release upload and the
-      # attestation operate on exactly the same set of files. Fail loudly if it
-      # is empty: attesting a glob that matches nothing fails the step later
-      # with a far less obvious error.
+      # Flatten every artifact into one directory for the draft release upload.
+      # Fail loudly if the build produced nothing.
       - name: Stage release files
         shell: bash
         run: |
@@ -195,15 +214,3 @@ jobs:
             staged/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # Replaces the never-wired GPG signing hook that used to live in
-      # build/after-pack.js. Keyless, no secrets to rotate; verify with
-      #   gh attestation verify <file> --repo ${{ github.repository }}
-      # Runs after the upload on purpose: the release is a draft, so nothing is
-      # public until the owner publishes it, and a provenance hiccup should show
-      # up as a red step rather than stranding the binaries. Attestations are
-      # keyed on the file digest, so order does not affect their validity.
-      - name: Attest build provenance
-        uses: actions/attest-build-provenance@v4
-        with:
-          subject-path: staged/*
