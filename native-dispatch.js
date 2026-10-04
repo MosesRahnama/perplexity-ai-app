@@ -714,24 +714,16 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
 
   async function claimRecoveryClose() {
     if (!conversation) return false;
-    const listing = await request('/api/chat-commands?limit=50');
+    const listing = await request('/api/chat-commands?limit=200');
     const queued = (Array.isArray(listing.commands) ? listing.commands : [])
       .filter((command) => command.status === 'queued' && command.surface === SURFACE)
       .sort((a, b) => Number(a.id) - Number(b.id));
-    const next = queued[0];
-    if (!next || next.kind !== 'close') return false;
-    const claimed = await request('/api/chat-commands/next', {surface: SURFACE});
-    const command = claimed.command;
+    const command = queued.find((item) => item.kind === 'close' &&
+      (String(item.conversation_id || '') === conversation.id ||
+       (!item.conversation_id && String(item.lane || '') === conversation.lane)));
     if (!command) return false;
-    if (Number(command.id) !== Number(next.id) || command.kind !== 'close') {
-      await request('/api/chat-commands/' + command.id + '/result', {
-        ok: false,
-        conversation_id: String(command.conversation_id || ''),
-        detail: 'Recovery queue changed before close claim; no Perplexity prompt was sent',
-      });
-      return false;
-    }
-    const result = await closeConversation(command);
+    const resolvedCommand = command.conversation_id ? command : {...command, conversation_id: conversation.id};
+    const result = await closeConversation(resolvedCommand);
     await reportCommandResult(command, result);
     return !!result.ok;
   }
