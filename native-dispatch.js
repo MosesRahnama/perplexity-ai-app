@@ -712,22 +712,6 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
     }
   }
 
-  async function claimRecoveryClose() {
-    if (!conversation) return false;
-    const listing = await request('/api/chat-commands?limit=200');
-    const queued = (Array.isArray(listing.commands) ? listing.commands : [])
-      .filter((command) => command.status === 'queued' && command.surface === SURFACE)
-      .sort((a, b) => Number(a.id) - Number(b.id));
-    const command = queued.find((item) => item.kind === 'close' &&
-      (String(item.conversation_id || '') === conversation.id ||
-       (!item.conversation_id && String(item.lane || '') === conversation.lane)));
-    if (!command) return false;
-    const resolvedCommand = command.conversation_id ? command : {...command, conversation_id: conversation.id};
-    const result = await closeConversation(resolvedCommand);
-    await reportCommandResult(command, result);
-    return !!result.ok;
-  }
-
   async function controllerReady() {
     try {
       const value = await request('/api/chat-open-prompt?surface=perplexity&lane=sup-perplexity');
@@ -790,11 +774,6 @@ function createNativeDispatch({BrowserWindow, BrowserView, ipcMain, shell, path,
         const resolved = await recoverState();
         if (!resolved) {
           console.warn('Native Perplexity Dispatch recovery remains frozen; no prompt replay or new work claim will occur');
-          if (await claimRecoveryClose()) {
-            recoveryReady = true;
-            tick();
-            return;
-          }
           setTimeout(attemptRecovery, 2000);
           return;
         }
